@@ -37,6 +37,7 @@ use crate::dmi::{data::DMIData, get_cpu_info};
 use crate::input::{
     source::{evdev, hidraw, iio, led, tty},
     target::{TargetDevice, TargetDeviceTypeId},
+    target_group::{self, GroupViews, TargetGroups},
 };
 use crate::udev::{
     self,
@@ -90,6 +91,8 @@ pub enum ManagerCommand {
     CreateTargetDevice {
         kind: TargetDeviceTypeId,
         persistent_id: Option<String>,
+        /// Target group of a gamepad, carried in its physical path
+        group: Option<String>,
         sender: mpsc::Sender<Result<String, ManagerError>>,
     },
     StopTargetDevice {
@@ -126,6 +129,18 @@ pub enum ManagerCommand {
     },
     GamepadReorderingFinished,
     RecheckUninitializedUdevDevices,
+    AddTargetGroup {
+        name: String,
+        sender: mpsc::Sender<Result<(), String>>,
+    },
+    RemoveTargetGroup {
+        name: String,
+        sender: mpsc::Sender<Result<(), String>>,
+    },
+    SetActiveTargetGroup {
+        name: String,
+        sender: mpsc::Sender<Result<(), String>>,
+    },
 }
 
 /// Manages input devices
@@ -194,6 +209,11 @@ pub struct Manager {
     /// Devices that udev has not finished initializing, keyed by
     /// (subsystem, sysname) with the recheck attempt count
     uninitialized_udev_devices: HashMap<(String, String), u32>,
+    /// Target groups every composite device keeps gamepads for, and the one
+    /// whose gamepads receive input
+    target_groups: TargetGroups,
+    /// Per-group views of /dev/input, without other groups' gamepads
+    group_views: GroupViews,
 }
 
 impl Manager {
@@ -237,6 +257,8 @@ impl Manager {
             target_gamepad_order: vec![],
             target_gamepad_order_changing: false,
             uninitialized_udev_devices: HashMap::new(),
+            target_groups: TargetGroups::load(std::path::Path::new(target_group::STATE_PATH)),
+            group_views: GroupViews::new(target_group::VIEWS_PATH, INPUT_PATH),
         }
     }
 
@@ -263,6 +285,12 @@ impl Manager {
                 log::info!("Started evdev device discovery thread");
                 watcher::watch(INPUT_PATH.into(), tx)
             });
+        }
+
+        // Views of the target groups kept from before a restart
+        let groups = self.target_groups.names().to_vec();
+        if let Err(e) = self.group_views.set_groups(&groups, input_node_group) {
+            log::error!("Failed to set up target group views: {e}");
         }
 
         log::debug!("Starting input manager task...");
@@ -337,12 +365,17 @@ impl Manager {
                 ManagerCommand::CreateTargetDevice {
                     kind,
                     persistent_id,
+                    group,
                     sender,
                 } => {
                     // Create the target device
-                    log::debug!("Got request to create target device: {kind}");
+                    log::debug!("Got request to create target device: {kind} ({group:?})");
                     let device = match self
-                        .create_and_start_target_device(kind.as_str(), persistent_id.as_deref())
+                        .create_and_start_target_device(
+                            kind.as_str(),
+                            persistent_id.as_deref(),
+                            group.as_deref(),
+                        )
                         .await
                     {
                         Ok(device) => device,
@@ -515,6 +548,10 @@ impl Manager {
                             continue;
                         }
 
+                        if let Some(node) = input_node_name(&device.devnode()) {
+                            let group = input_node_group(node);
+                            self.group_views.node_added(node, group.as_deref());
+                        }
                         if let Err(e) = self.on_udev_device_added(device).await {
                             log::error!("Error adding device '{dev_name} ({dev_sysname})': {e}");
                         }
@@ -526,11 +563,36 @@ impl Manager {
                         // parked there waiting for udev initialization
                         self.uninitialized_udev_devices
                             .remove(&(device.subsystem(), device.sysname()));
+                        if let Some(node) = input_node_name(&device.devnode()) {
+                            self.group_views.node_removed(node);
+                        }
                         if let Err(e) = self.on_udev_device_removed(device).await {
                             log::error!("Error removing device: {e}");
                         }
                     }
                 },
+                ManagerCommand::AddTargetGroup { name, sender } => {
+                    let result = self.change_target_groups(|groups| groups.add(&name)).await;
+                    if let Err(e) = sender.send(result).await {
+                        log::error!("Failed to send response: {e:?}");
+                    }
+                }
+                ManagerCommand::RemoveTargetGroup { name, sender } => {
+                    let result = self
+                        .change_target_groups(|groups| groups.remove(&name))
+                        .await;
+                    if let Err(e) = sender.send(result).await {
+                        log::error!("Failed to send response: {e:?}");
+                    }
+                }
+                ManagerCommand::SetActiveTargetGroup { name, sender } => {
+                    let result = self
+                        .change_target_groups(|groups| groups.set_active(&name))
+                        .await;
+                    if let Err(e) = sender.send(result).await {
+                        log::error!("Failed to send response: {e:?}");
+                    }
+                }
                 ManagerCommand::SetManageAllDevices(manage_all_devices) => {
                     log::debug!("Setting management of all devices to: {manage_all_devices}");
                     if self.manage_all_devices == manage_all_devices {
@@ -769,6 +831,7 @@ impl Manager {
         &self,
         kind: &str,
         persistent_id: Option<&str>,
+        group: Option<&str>,
     ) -> Result<(String, TargetDevice), Box<dyn Error>> {
         log::trace!("Creating target device: {kind}");
         let Ok(target_id) = TargetDeviceTypeId::try_from(kind) else {
@@ -779,7 +842,7 @@ impl Manager {
         let path = self.next_target_path(target_id.device_class())?;
         let dbus = DBusInterfaceManager::new(self.dbus.connection().clone(), path.clone())?;
         let id = persistent_id.unwrap_or(&path);
-        let device = TargetDevice::from_type_id(target_id, dbus, id)?;
+        let device = TargetDevice::from_type_id(target_id, dbus, id, group)?;
 
         Ok((path, device))
     }
@@ -944,9 +1007,10 @@ impl Manager {
         &mut self,
         kind: &str,
         persistent_id: Option<&str>,
+        group: Option<&str>,
     ) -> Result<HashMap<String, TargetDeviceClient>, ManagerError> {
         // Create the target device
-        let device = match self.create_target_device(kind, persistent_id).await {
+        let device = match self.create_target_device(kind, persistent_id, group).await {
             Ok(device) => device,
             Err(e) => {
                 let err = format!("Error creating target device: {e:?}");
@@ -1016,11 +1080,14 @@ impl Manager {
                 target_devices.push(target_id);
             }
         }
+        if !self.target_groups.names().is_empty() {
+            client.set_target_groups(self.target_groups.clone()).await?;
+        }
         client.set_target_devices(target_devices).await?;
 
         // Create a DBus target device
         log::debug!("Creating target devices for {composite_path}");
-        let dbus_device = self.create_target_device("dbus", None).await?;
+        let dbus_device = self.create_target_device("dbus", None, None).await?;
         let dbus_devices = self.start_target_devices(vec![dbus_device]).await?;
         let dbus_paths = dbus_devices.keys();
         for dbus_path in dbus_paths {
@@ -1897,7 +1964,7 @@ impl Manager {
 
     /// Creates a DBus object and return the (active) handle to the listener
     fn listen_on_dbus(&mut self) {
-        let iface = ManagerInterface::new(self.tx.clone());
+        let iface = ManagerInterface::new(self.tx.clone(), self.target_groups.clone());
         self.dbus.register(iface);
     }
 
@@ -1907,6 +1974,48 @@ impl Manager {
         client: &CompositeDeviceClient,
     ) -> Result<(), Box<dyn Error>> {
         client.add_source_device(device).await?;
+        Ok(())
+    }
+
+    /// Change the target groups. A change is kept across restarts, followed by
+    /// the /dev/input views (before any gamepad of a new group appears) and by
+    /// every composite device, and announced on DBus.
+    async fn change_target_groups(
+        &mut self,
+        change: impl FnOnce(&mut TargetGroups) -> Result<bool, String>,
+    ) -> Result<(), String> {
+        let mut groups = self.target_groups.clone();
+        if !change(&mut groups)? {
+            return Ok(());
+        }
+        log::info!(
+            "Target groups: {:?}, active: '{}'",
+            groups.names(),
+            groups.active()
+        );
+        self.target_groups = groups.clone();
+
+        if let Err(e) = groups.save(std::path::Path::new(target_group::STATE_PATH)) {
+            log::warn!("Failed to save target groups: {e}");
+        }
+        if let Err(e) = self
+            .group_views
+            .set_groups(groups.names(), input_node_group)
+        {
+            log::error!("Failed to update target group views: {e}");
+        }
+        for (path, device) in self.composite_devices.iter() {
+            if let Err(e) = device.set_target_groups(groups.clone()).await {
+                log::error!("Failed to set target groups on {path}: {e:?}");
+            }
+        }
+
+        let conn = self.dbus.connection().clone();
+        tokio::task::spawn(async move {
+            if let Err(e) = ManagerInterface::update_target_groups(&conn, groups).await {
+                log::warn!("Failed to emit target groups changed signal: {e}");
+            }
+        });
         Ok(())
     }
 
@@ -1986,4 +2095,21 @@ impl Manager {
             }
         });
     }
+}
+
+/// The name of a node directly in /dev/input, from its device path
+fn input_node_name(devnode: &str) -> Option<&str> {
+    devnode
+        .strip_prefix(INPUT_PATH)?
+        .strip_prefix('/')
+        .filter(|name| !name.is_empty() && !name.contains('/'))
+}
+
+/// The target group a node in /dev/input belongs to, from its device's
+/// physical path. Nodes of other devices belong to no group.
+fn input_node_group(node: &str) -> Option<String> {
+    let device =
+        ::udev::Device::from_subsystem_sysname("input".to_string(), node.to_string()).ok()?;
+    let phys = device.get_attribute_from_tree("phys");
+    target_group::group_of_phys(&phys).map(str::to_string)
 }

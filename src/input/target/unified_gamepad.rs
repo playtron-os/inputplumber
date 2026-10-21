@@ -50,9 +50,9 @@ pub struct UnifiedGamepadDevice {
 
 impl UnifiedGamepadDevice {
     /// Create a new [UnifiedGamepadDevice]
-    pub fn new() -> Result<Self, Box<dyn Error>> {
+    pub fn new(phys: &str) -> Result<Self, Box<dyn Error>> {
         // Create the virtual device
-        let uhid_device = UnifiedGamepadDevice::create_virtual_device()?;
+        let uhid_device = UnifiedGamepadDevice::create_virtual_device(phys)?;
         let device = Self {
             device: uhid_device,
             dbus_path: None,
@@ -68,10 +68,10 @@ impl UnifiedGamepadDevice {
     }
 
     /// Create the virtual device to emulate
-    fn create_virtual_device() -> Result<UHIDDevice<File>, Box<dyn Error>> {
+    fn create_virtual_device(phys: &str) -> Result<UHIDDevice<File>, Box<dyn Error>> {
         let device = UHIDDevice::create(CreateParams {
             name: "InputPlumber Unified Gamepad".to_string(),
-            phys: "".to_string(),
+            phys: phys.to_string(),
             uniq: "".to_string(),
             bus: Bus::USB,
             // TODO: Find an appropriate VID/PID to use. For the time being, this

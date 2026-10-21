@@ -62,6 +62,8 @@ pub struct SteamDeckUhidDevice {
     current_report: ReportType,
     device: Option<UHIDDevice<File>>,
     lizard_mode_enabled: bool,
+    /// Physical path given to the virtual device, empty unless it is grouped
+    phys: String,
     queued_events: Vec<ScheduledNativeEvent>,
     /// Which string attribute the last GetStringAttribute SetReport asked for.
     requested_string_attribute: StringAttribute,
@@ -70,14 +72,15 @@ pub struct SteamDeckUhidDevice {
 }
 
 impl SteamDeckUhidDevice {
-    pub fn new(persistent_id: &str) -> Result<Self, Box<dyn Error>> {
-        SteamDeckUhidDevice::new_with_config(SteamDeckConfig::default(), persistent_id)
+    pub fn new(persistent_id: &str, phys: &str) -> Result<Self, Box<dyn Error>> {
+        SteamDeckUhidDevice::new_with_config(SteamDeckConfig::default(), persistent_id, phys)
     }
 
     /// Create a new emulated Steam Deck device with the given configuration.
     pub fn new_with_config(
         config: SteamDeckConfig,
         persistent_id: &str,
+        phys: &str,
     ) -> Result<Self, Box<dyn Error>> {
         let serial_number = generate_deck_serial(persistent_id);
         let board_serial = generate_deck_board_serial(persistent_id);
@@ -89,6 +92,7 @@ impl SteamDeckUhidDevice {
             current_report: ReportType::InputData,
             device: None,
             lizard_mode_enabled: false,
+            phys: phys.to_string(),
             queued_events: vec![],
             requested_string_attribute: StringAttribute::default(),
             serial_number,
@@ -100,10 +104,11 @@ impl SteamDeckUhidDevice {
     fn create_virtual_device(
         config: &SteamDeckConfig,
         serial_number: &str,
+        phys: &str,
     ) -> Result<UHIDDevice<File>, Box<dyn Error>> {
         let device = UHIDDevice::create(CreateParams {
             name: config.name.clone(),
-            phys: String::from(""),
+            phys: phys.to_string(),
             uniq: serial_number.to_string(),
             bus: Bus::USB,
             vendor: VID as u32,
@@ -863,8 +868,11 @@ impl TargetOutputDevice for SteamDeckUhidDevice {
                     TryRecvError::Disconnected => self.config.clone(),
                 },
             };
-            let device =
-                SteamDeckUhidDevice::create_virtual_device(&config, self.serial_number.as_ref())?;
+            let device = SteamDeckUhidDevice::create_virtual_device(
+                &config,
+                self.serial_number.as_ref(),
+                &self.phys,
+            )?;
             self.device = Some(device);
             self.config = config;
             self.config_rx = None;

@@ -11,6 +11,7 @@ use crate::input::info::DeviceInfo;
 use crate::input::output_capability::OutputCapability;
 use crate::input::target::client::TargetDeviceClient;
 use crate::input::target::TargetDeviceTypeId;
+use crate::input::target_group::TargetGroups;
 use crate::input::{capability::Capability, event::Event, output_event::OutputEvent};
 use crate::sync::{ReceiveTimeoutError, TimeoutReceiver};
 
@@ -314,6 +315,27 @@ impl CompositeDeviceClient {
     ) -> Result<(), ClientError> {
         self.tx
             .send(CompositeCommand::SetTargetDevices(devices))
+            .await?;
+        Ok(())
+    }
+
+    /// Set the target groups the composite device keeps gamepads for, and the
+    /// one whose gamepads receive input.
+    pub async fn set_target_groups(&self, groups: TargetGroups) -> Result<(), ClientError> {
+        self.tx
+            .send(CompositeCommand::SetTargetGroups(groups))
+            .await?;
+        Ok(())
+    }
+
+    /// Record the target group of a target device it is about to attach
+    pub async fn assign_target_group(
+        &self,
+        target_path: String,
+        group: String,
+    ) -> Result<(), ClientError> {
+        self.tx
+            .send(CompositeCommand::AssignTargetGroup(target_path, group))
             .await?;
         Ok(())
     }

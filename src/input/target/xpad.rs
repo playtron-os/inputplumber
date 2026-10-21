@@ -33,9 +33,9 @@ pub struct XBoxController {
 }
 
 impl XBoxController {
-    pub fn new(model: &str) -> Result<Self, Box<dyn Error>> {
+    pub fn new(model: &str, phys: Option<&str>) -> Result<Self, Box<dyn Error>> {
         let axis_map = XBoxController::get_abs_info();
-        let device = XBoxController::create_virtual_device(&axis_map, model)?;
+        let device = XBoxController::create_virtual_device(&axis_map, model, phys)?;
         let capabilities = get_model_capabilties(model);
         Ok(Self {
             device,
@@ -71,6 +71,7 @@ impl XBoxController {
     fn create_virtual_device(
         axis_map: &HashMap<AbsoluteAxisCode, AbsInfo>,
         model: &str,
+        phys: Option<&str>,
     ) -> Result<VirtualDevice, Box<dyn Error>> {
         // Setup Key inputs
         let mut keys = AttributeSet::<KeyCode>::new();
@@ -144,9 +145,11 @@ impl XBoxController {
         ff.insert(FFEffectCode::FF_GAIN);
 
         // Build the device
-        let device = VirtualDeviceBuilder::new()?
-            .name(name)
-            .input_id(id)
+        let mut builder = VirtualDeviceBuilder::new()?.name(name).input_id(id);
+        if let Some(phys) = phys {
+            builder = builder.with_phys(phys)?;
+        }
+        let device = builder
             .with_keys(&keys)?
             .with_absolute_axis(&abs_x)?
             .with_absolute_axis(&abs_y)?

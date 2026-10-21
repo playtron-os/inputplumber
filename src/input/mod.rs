@@ -8,3 +8,4 @@ pub mod output_capability;
 pub mod output_event;
 pub mod source;
 pub mod target;
+pub mod target_group;

@@ -11,6 +11,7 @@ use crate::{
         output_capability::OutputCapability,
         output_event::OutputEvent,
         target::{client::TargetDeviceClient, TargetDeviceTypeId},
+        target_group::TargetGroups,
     },
 };
 
@@ -43,6 +44,8 @@ pub enum CompositeCommand {
     SetInterceptActivation(Vec<Capability>, Capability),
     SetInterceptMode(InterceptMode),
     SetTargetDevices(Vec<TargetDeviceTypeId>),
+    SetTargetGroups(TargetGroups),
+    AssignTargetGroup(String, String),
     TargetDevicesCreated(Vec<String>),
     GetFilteredEvents(mpsc::Sender<HashMap<String, Vec<Capability>>>),
     SetFilteredEvents(HashMap<String, Vec<Capability>>),

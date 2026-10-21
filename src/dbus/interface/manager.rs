@@ -8,7 +8,7 @@ use crate::{
     config::{CompositeDeviceConfig, LoadError},
     constants::BUS_PREFIX,
     dbus::{interface::Unregisterable, polkit::check_polkit},
-    input::{manager::ManagerCommand, target::TargetDeviceTypeId},
+    input::{manager::ManagerCommand, target::TargetDeviceTypeId, target_group::TargetGroups},
 };
 
 /// The [ManagerInterface] provides a DBus interface that can be exposed for managing
@@ -17,13 +17,32 @@ use crate::{
 pub struct ManagerInterface {
     tx: mpsc::Sender<ManagerCommand>,
     gamepad_order: Vec<String>,
+    target_groups: TargetGroups,
 }
 
 impl ManagerInterface {
-    pub fn new(tx: mpsc::Sender<ManagerCommand>) -> ManagerInterface {
+    pub fn new(tx: mpsc::Sender<ManagerCommand>, target_groups: TargetGroups) -> ManagerInterface {
         ManagerInterface {
             tx,
             gamepad_order: Default::default(),
+            target_groups,
+        }
+    }
+
+    /// Send a target group request to the manager and wait for its answer
+    async fn ask_about_group(
+        &self,
+        command: impl FnOnce(mpsc::Sender<Result<(), String>>) -> ManagerCommand,
+    ) -> fdo::Result<()> {
+        let (sender, mut receiver) = mpsc::channel(1);
+        self.tx
+            .send_timeout(command(sender), Duration::from_millis(500))
+            .await
+            .map_err(|err| fdo::Error::Failed(err.to_string()))?;
+        match receiver.recv().await {
+            Some(Ok(())) => Ok(()),
+            Some(Err(e)) => Err(fdo::Error::InvalidArgs(e)),
+            None => Err(fdo::Error::Failed("No response from manager".to_string())),
         }
     }
 }
@@ -77,6 +96,86 @@ impl ManagerInterface {
         self.gamepad_order = order;
 
         Ok(())
+    }
+
+    /// Target groups: named sets of gamepad target devices. Every composite
+    /// device keeps one gamepad of each gamepad target type per group, and
+    /// only the active group's gamepads receive input; the others stay
+    /// connected and at rest. Empty means no groups, one set of targets.
+    #[zbus(property)]
+    async fn target_groups(
+        &self,
+        #[zbus(connection)] conn: &Connection,
+        #[zbus(header)] hdr: Option<Header<'_>>,
+    ) -> fdo::Result<Vec<String>> {
+        check_polkit(conn, hdr, "org.shadowblip.InputPlumber.TargetGroups").await?;
+        Ok(self.target_groups.names().to_vec())
+    }
+
+    /// The target group whose gamepads receive input, or "" when there are
+    /// no groups. Setting a group that does not exist adds it first.
+    #[zbus(property)]
+    async fn active_target_group(
+        &self,
+        #[zbus(connection)] conn: &Connection,
+        #[zbus(header)] hdr: Option<Header<'_>>,
+    ) -> fdo::Result<String> {
+        check_polkit(conn, hdr, "org.shadowblip.InputPlumber.ActiveTargetGroup").await?;
+        Ok(self.target_groups.active().to_string())
+    }
+
+    #[zbus(property)]
+    async fn set_active_target_group(
+        &self,
+        name: String,
+        #[zbus(connection)] conn: &Connection,
+        #[zbus(header)] hdr: Option<Header<'_>>,
+    ) -> zbus::Result<()> {
+        check_polkit(
+            conn,
+            hdr,
+            "org.shadowblip.InputPlumber.SetActiveTargetGroup",
+        )
+        .await?;
+        self.ask_about_group(|sender| ManagerCommand::SetActiveTargetGroup { name, sender })
+            .await
+            .map_err(zbus::Error::from)
+    }
+
+    /// Add a target group: every composite device creates its gamepads, at
+    /// rest unless the group is active. Adding an existing group does nothing.
+    async fn add_target_group(
+        &self,
+        name: String,
+        #[zbus(connection)] conn: &Connection,
+        #[zbus(header)] hdr: Header<'_>,
+    ) -> fdo::Result<()> {
+        check_polkit(
+            conn,
+            Some(hdr),
+            "org.shadowblip.InputPlumber.AddTargetGroup",
+        )
+        .await?;
+        self.ask_about_group(|sender| ManagerCommand::AddTargetGroup { name, sender })
+            .await
+    }
+
+    /// Remove a target group and its gamepads. The active group can only be
+    /// removed last. Removing a group that does not exist does nothing.
+    async fn remove_target_group(
+        &self,
+        name: String,
+        #[zbus(connection)] conn: &Connection,
+        #[zbus(header)] hdr: Header<'_>,
+    ) -> fdo::Result<()> {
+        check_polkit(
+            conn,
+            Some(hdr),
+            "org.shadowblip.InputPlumber.RemoveTargetGroup",
+        )
+        .await?;
+        self.ask_about_group(|sender| ManagerCommand::RemoveTargetGroup { name, sender })
+            .await
     }
 
     /// If set to 'true', InputPlumber will try to manage all input devices
@@ -212,6 +311,7 @@ impl ManagerInterface {
                 ManagerCommand::CreateTargetDevice {
                     kind,
                     persistent_id: None,
+                    group: None,
                     sender,
                 },
                 Duration::from_millis(500),
@@ -359,6 +459,32 @@ impl ManagerInterface {
         iface
             .gamepad_order_changed(iface_ref.signal_emitter())
             .await?;
+
+        Ok(())
+    }
+
+    /// Update the target group properties and emit their changed signals
+    pub async fn update_target_groups(
+        conn: &Connection,
+        groups: TargetGroups,
+    ) -> Result<(), zbus::Error> {
+        let path = format!("{BUS_PREFIX}/Manager");
+        let iface_ref = conn.object_server().interface::<_, Self>(path).await?;
+
+        let mut iface = iface_ref.get_mut().await;
+        let names_changed = iface.target_groups.names() != groups.names();
+        let active_changed = iface.target_groups.active() != groups.active();
+        iface.target_groups = groups;
+        if names_changed {
+            iface
+                .target_groups_changed(iface_ref.signal_emitter())
+                .await?;
+        }
+        if active_changed {
+            iface
+                .active_target_group_changed(iface_ref.signal_emitter())
+                .await?;
+        }
 
         Ok(())
     }

@@ -42,8 +42,8 @@ pub struct HoripadSteamDevice {
 }
 
 impl HoripadSteamDevice {
-    pub fn new() -> Result<Self, Box<dyn Error>> {
-        let device = HoripadSteamDevice::create_virtual_device()?;
+    pub fn new(phys: &str) -> Result<Self, Box<dyn Error>> {
+        let device = HoripadSteamDevice::create_virtual_device(phys)?;
         Ok(Self {
             device,
             state: PackedInputDataReport::default(),
@@ -53,10 +53,10 @@ impl HoripadSteamDevice {
     }
 
     /// Create the virtual device to emulate
-    fn create_virtual_device() -> Result<UHIDDevice<File>, Box<dyn Error>> {
+    fn create_virtual_device(phys: &str) -> Result<UHIDDevice<File>, Box<dyn Error>> {
         let device = UHIDDevice::create(CreateParams {
             name: String::from("HORI CO.,LTD. HORIPAD STEAM"),
-            phys: String::from(""),
+            phys: phys.to_string(),
             uniq: String::from(""),
             bus: Bus::USB,
             vendor: VID as u32,

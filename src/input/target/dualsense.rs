@@ -119,8 +119,8 @@ pub struct DualSenseDevice {
 }
 
 impl DualSenseDevice {
-    pub fn new(hardware: DualSenseHardware) -> Result<Self, Box<dyn Error>> {
-        let device = DualSenseDevice::create_virtual_device(&hardware)?;
+    pub fn new(hardware: DualSenseHardware, phys: &str) -> Result<Self, Box<dyn Error>> {
+        let device = DualSenseDevice::create_virtual_device(&hardware, phys)?;
         Ok(Self {
             device,
             state: PackedInputDataReport::Usb(USBPackedInputDataReport::new()),
@@ -137,13 +137,14 @@ impl DualSenseDevice {
     /// Create the virtual device to emulate
     fn create_virtual_device(
         hardware: &DualSenseHardware,
+        phys: &str,
     ) -> Result<UHIDDevice<File>, Box<dyn Error>> {
         let device = UHIDDevice::create(CreateParams {
             name: match hardware.model {
                 ModelType::Edge => String::from(DS5_EDGE_NAME),
                 ModelType::Normal => String::from(DS5_NAME),
             },
-            phys: String::from(""),
+            phys: phys.to_string(),
             uniq: format!(
                 "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
                 hardware.mac_addr[5],

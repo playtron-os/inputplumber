@@ -412,6 +412,15 @@ impl CompositeDevice {
                             log::error!("Failed to set target devices: {e}");
                         }
                     }
+                    CompositeCommand::SetTargetGroups(groups) => {
+                        let persistent_id = self.get_persistent_id().await;
+                        if let Err(e) = self.targets.set_groups(groups, &persistent_id).await {
+                            log::error!("Failed to set target groups: {e}");
+                        }
+                    }
+                    CompositeCommand::AssignTargetGroup(path, group) => {
+                        self.targets.assign_group(path, group);
+                    }
                     CompositeCommand::TargetDevicesCreated(paths) => {
                         self.targets.finish_target_creation(paths);
                         if let Some(target_types) = self.targets.take_pending_set_devices() {

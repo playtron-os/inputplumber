@@ -51,6 +51,7 @@ use super::{
     },
     output_capability::OutputCapability,
     output_event::OutputEvent,
+    target_group::phys_for,
 };
 
 use std::convert::TryFrom;
@@ -806,12 +807,15 @@ pub enum TargetDevice {
 }
 
 impl TargetDevice {
-    /// Create a new target device from the given target device type id
+    /// Create a new target device from the given target device type id. A
+    /// gamepad of a target group carries the group in its physical path.
     pub fn from_type_id(
         id: TargetDeviceTypeId,
         dbus: DBusInterfaceManager,
         persistent_id: &str,
+        group: Option<&str>,
     ) -> Result<Self, Box<dyn Error>> {
+        let phys = group.map(phys_for).unwrap_or_default();
         match id.as_str() {
             "dbus" => {
                 let device = DBusDevice::default();
@@ -824,6 +828,13 @@ impl TargetDevice {
                 Ok(Self::Debug(driver))
             }
             "deck" => {
+                if let Some(group) = group {
+                    // The kernel names a USB device's physical path, so this
+                    // gamepad cannot say which group it belongs to.
+                    log::warn!(
+                        "The 'deck' target cannot carry target group '{group}'; use 'deck-uhid'"
+                    );
+                }
                 let device = SteamDeckDevice::new(persistent_id)?;
                 let options = TargetDriverOptions {
                     poll_rate: Duration::from_millis(4),
@@ -833,7 +844,7 @@ impl TargetDevice {
                 Ok(Self::SteamDeck(driver))
             }
             "deck-uhid" => {
-                let device = SteamDeckUhidDevice::new(persistent_id)?;
+                let device = SteamDeckUhidDevice::new(persistent_id, &phys)?;
                 let options = TargetDriverOptions {
                     poll_rate: Duration::from_millis(4),
                     buffer_size: 2048,
@@ -865,7 +876,7 @@ impl TargetDevice {
                     ),
                     _ => unreachable!("unexpected ds5 target id: {id}"),
                 };
-                let device = DualSenseDevice::new(hw)?;
+                let device = DualSenseDevice::new(hw, &phys)?;
                 let options = TargetDriverOptions {
                     poll_rate: Duration::from_millis(4),
                     buffer_size: 2048,
@@ -874,7 +885,7 @@ impl TargetDevice {
                 Ok(Self::DualSense(driver))
             }
             "hori-steam" => {
-                let device = HoripadSteamDevice::new()?;
+                let device = HoripadSteamDevice::new(&phys)?;
                 let options = TargetDriverOptions {
                     poll_rate: Duration::from_millis(1),
                     buffer_size: 2048,
@@ -883,7 +894,7 @@ impl TargetDevice {
                 Ok(Self::HoripadSteam(driver))
             }
             "8bitdo-u2" => {
-                let device = Ultimate2WirelessDevice::new(persistent_id)?;
+                let device = Ultimate2WirelessDevice::new(persistent_id, &phys)?;
                 let options = TargetDriverOptions {
                     poll_rate: Duration::from_millis(1),
                     buffer_size: 2048,
@@ -924,12 +935,12 @@ impl TargetDevice {
                 Ok(Self::Touchscreen(driver))
             }
             "xb360" | "gamepad" | "xbox-elite" | "xbox-series" => {
-                let device = XBoxController::new(id.as_str())?;
+                let device = XBoxController::new(id.as_str(), group.map(|_| phys.as_str()))?;
                 let driver = TargetDriver::new(id, device, dbus);
                 Ok(Self::XBoxController(driver))
             }
             "unified-gamepad" => {
-                let device = UnifiedGamepadDevice::new()?;
+                let device = UnifiedGamepadDevice::new(&phys)?;
                 let driver = TargetDriver::new(id, device, dbus);
                 Ok(Self::UnifiedGamepad(driver))
             }

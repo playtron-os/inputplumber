@@ -48,7 +48,7 @@ pub struct Ultimate2WirelessDevice {
 }
 
 impl Ultimate2WirelessDevice {
-    pub fn new(persistent_id: &str) -> Result<Self, Box<dyn Error>> {
+    pub fn new(persistent_id: &str, phys: &str) -> Result<Self, Box<dyn Error>> {
         let mac_addr = generate_mac(ULTIMATE2_BASE_MAC, persistent_id);
         let uniq = format!(
             "{:02x}:{:02x}:{:02x}:{:02x}:{:02x}:{:02x}",
@@ -56,7 +56,7 @@ impl Ultimate2WirelessDevice {
         );
         let device = UHIDDevice::create(CreateParams {
             name: String::from("8BitDo Ultimate 2 Wireless Controller"),
-            phys: String::from(""),
+            phys: phys.to_string(),
             uniq,
             bus: Bus::USB,
             vendor: VID as u32,

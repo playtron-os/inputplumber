@@ -17,6 +17,7 @@ use crate::{
         event::native::NativeEvent,
         manager::ManagerCommand,
         target::{client::TargetDeviceClient, TargetDeviceTypeId},
+        target_group::{persistent_id_for, TargetGroups},
     },
 };
 
@@ -55,6 +56,14 @@ pub struct CompositeDeviceTargets {
     /// Map of DBusDevice DBus paths to their respective transmitter channel.
     /// E.g. {"/org/shadowblip/InputPlumber/devices/target/dbus0": <Sender>}
     target_dbus_devices: HashMap<String, TargetDeviceClient>,
+    /// Target groups to keep gamepads for, and the one whose gamepads
+    /// receive input. Without groups there is one ungrouped set of targets.
+    groups: TargetGroups,
+    /// Group of each grouped gamepad target, by DBus path.
+    target_groups: HashMap<String, String>,
+    /// Target device types last asked for; each group gets its own gamepads
+    /// of these types.
+    requested_types: Vec<TargetDeviceTypeId>,
 }
 
 impl CompositeDeviceTargets {
@@ -77,6 +86,9 @@ impl CompositeDeviceTargets {
             pending_set_devices: None,
             target_devices_suspended: Default::default(),
             target_dbus_devices: Default::default(),
+            groups: Default::default(),
+            target_groups: Default::default(),
+            requested_types: Default::default(),
         }
     }
 
@@ -136,6 +148,18 @@ impl CompositeDeviceTargets {
         let dbus_path = self.path.as_str();
         log::info!("[{dbus_path}] Setting target devices: {device_types:?}");
 
+        // One of each type: target groups each get their own gamepads of
+        // these types, so a list read back from the targets of several groups
+        // must not multiply them.
+        let mut unique_types = Vec::with_capacity(device_types.len());
+        for kind in device_types {
+            if !unique_types.contains(&kind) {
+                unique_types.push(kind);
+            }
+        }
+        let device_types = unique_types;
+        self.requested_types = device_types.clone();
+
         // NOTE: If the device is suspended, we resume the device and use the new
         // targets, but we may want to prevent setting new targets alltogether.
         if !self.target_devices_suspended.is_empty() {
@@ -154,23 +178,31 @@ impl CompositeDeviceTargets {
         }
 
         // Identify which target devices are new
-        let mut device_types_to_start: Vec<TargetDeviceTypeId> = vec![];
-        let device_types_map = self.target_kinds_running().await?;
-        let device_types_running: Vec<TargetDeviceTypeId> =
-            device_types_map.values().cloned().collect();
-        for kind in device_types.iter() {
-            if device_types_running.contains(kind) {
-                log::debug!("[{dbus_path}] Target device {kind} already running, nothing to do.");
+        let wanted = self.groups.targets_for(&device_types);
+        let running: Vec<(String, (TargetDeviceTypeId, Option<String>))> = self
+            .target_kinds_running()
+            .await?
+            .into_iter()
+            .map(|(path, kind)| {
+                let group = self.target_groups.get(&path).cloned();
+                (path, (kind, group))
+            })
+            .collect();
+        let mut device_types_to_start: Vec<(TargetDeviceTypeId, Option<String>)> = vec![];
+        for target in wanted.iter() {
+            if running.iter().any(|(_, running)| running == target) {
+                let (kind, group) = target;
+                log::debug!("[{dbus_path}] Target device {kind} ({group:?}) already running, nothing to do.");
                 continue;
             }
 
-            device_types_to_start.push(*kind);
+            device_types_to_start.push(target.clone());
         }
 
         // Identify the targets that need to close
         let mut targets_to_stop: HashMap<String, TargetDeviceClient> = HashMap::new();
-        for (path, target_type) in device_types_map {
-            if device_types.contains(&target_type) {
+        for (path, target) in running {
+            if wanted.contains(&target) {
                 continue;
             }
             let Some(target) = self.target_devices.get(&path) else {
@@ -185,6 +217,7 @@ impl CompositeDeviceTargets {
         // Remove old targets from the routing maps; stop and create run in the background
         for path in targets_to_stop.keys() {
             self.target_devices.remove(path);
+            self.target_groups.remove(path);
             for target_devices in self.target_devices_by_capability.values_mut() {
                 target_devices.remove(path);
             }
@@ -210,20 +243,25 @@ impl CompositeDeviceTargets {
             // Create new target devices using the input manager. Spawn a task
             // for each create request so they can be performed simultaneously.
             let mut tasks: JoinSet<Result<String, Box<dyn Error + Send + Sync>>> = JoinSet::new();
-            for kind in device_types_to_start {
+            for (kind, group) in device_types_to_start {
                 let dbus_path = dbus_path.to_owned();
                 let manager = manager.clone();
                 let composite_path = composite_path.clone();
-                let persistent_id = Some(persistent_id.clone());
+                let device = device.clone();
+                let persistent_id = Some(match group.as_deref() {
+                    Some(group) => persistent_id_for(&persistent_id, group),
+                    None => persistent_id.clone(),
+                });
 
                 // Spawn a task that requests creating a new target device.
                 tasks.spawn(async move {
                 // Ask the input manager to create a target device
-                log::debug!("[{dbus_path}] Requesting to create device: {kind}");
+                log::debug!("[{dbus_path}] Requesting to create device: {kind} ({group:?})");
                 let (sender, mut receiver) = mpsc::channel(1);
                 let create_cmd = ManagerCommand::CreateTargetDevice {
                     kind,
                     persistent_id,
+                    group: group.clone(),
                     sender,
                 };
                 manager.send(create_cmd).await?;
@@ -232,6 +270,15 @@ impl CompositeDeviceTargets {
                     return Err("Channel closed waiting for response from input manager".into());
                 };
                 let target_path = response?;
+
+                // Say which group the target is in before it is attached, so it
+                // never receives another group's input.
+                if let Some(group) = group {
+                    device
+                        .assign_target_group(target_path.clone(), group)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                }
 
                 // Ask the input manager to attach the target device to this composite
                 // device. Note that this *must* be run in an async task to prevent
@@ -291,6 +338,63 @@ impl CompositeDeviceTargets {
         Ok(())
     }
 
+    /// Whether the target at the given path is written to: every target but
+    /// the gamepads of inactive target groups.
+    fn receives_input(&self, path: &str) -> bool {
+        self.groups
+            .receives_input(self.target_groups.get(path).map(String::as_str))
+    }
+
+    /// Record which target group a newly created target belongs to.
+    pub fn assign_group(&mut self, path: String, group: String) {
+        self.target_groups.insert(path, group);
+    }
+
+    /// Follow a change of target groups: create or stop the gamepads of
+    /// added or removed groups, and when another group became active, leave
+    /// the old group's gamepads at rest (buttons released, axes centred).
+    pub async fn set_groups(
+        &mut self,
+        groups: TargetGroups,
+        persistent_id: &str,
+    ) -> Result<(), Box<dyn Error>> {
+        let dbus_path = self.path.clone();
+        let names_changed = groups.names() != self.groups.names();
+        let old_active = std::mem::replace(&mut self.groups, groups)
+            .active()
+            .to_string();
+        log::info!(
+            "[{dbus_path}] Target groups: {:?}, active: '{}'",
+            self.groups.names(),
+            self.groups.active()
+        );
+
+        if old_active != self.groups.active() {
+            for (path, target) in &self.target_devices {
+                if self.target_groups.get(path) != Some(&old_active) {
+                    continue;
+                }
+                log::debug!("[{dbus_path}] Leaving inactive gamepad at rest: {path}");
+                if let Err(e) = target.clear_state().await {
+                    log::error!("[{dbus_path}] Failed to clear target device state {path}: {e}");
+                }
+            }
+        }
+
+        // Suspended devices make their targets on resume, with these groups.
+        if names_changed && self.target_devices_suspended.is_empty() {
+            // Targets attached over DBus were never asked for by type: keep them.
+            let mut types = self.requested_types.clone();
+            for kind in self.target_kinds_running().await?.into_values() {
+                if !types.contains(&kind) {
+                    types.push(kind);
+                }
+            }
+            self.set_devices(types, persistent_id).await?;
+        }
+        Ok(())
+    }
+
     /// Called when the spawned target device creation task finishes. Clears
     /// the creation flag and enqueues the created target devices to wait for
     /// their attachment message.
@@ -343,9 +447,11 @@ impl CompositeDeviceTargets {
             return;
         };
 
-        // Filter for capable target devices
+        // Filter for capable target devices, leaving out the gamepads of
+        // inactive target groups
         let target_devices: Vec<(&str, &TargetDeviceClient)> = target_paths
             .iter()
+            .filter(|path| self.receives_input(path))
             .filter_map(|path| {
                 let device = self.target_devices.get(path);
                 device.map(|client| (path.as_str(), client))
@@ -592,6 +698,7 @@ impl CompositeDeviceTargets {
 
             self.target_devices_suspended.push(target_type);
             self.target_devices.remove(&path);
+            self.target_groups.remove(&path);
             for target_devices in self.target_devices_by_capability.values_mut() {
                 target_devices.remove(&path);
             }

@@ -334,6 +334,56 @@
     </defaults>
   </action>
 
+  <action id="org.shadowblip.InputPlumber.TargetGroups">
+    <description>Read TargetGroups</description>
+    <message>Authorization required to read the target groups.</message>
+    <defaults>
+      <allow_any>yes</allow_any>
+      <allow_inactive>yes</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+  </action>
+
+  <action id="org.shadowblip.InputPlumber.ActiveTargetGroup">
+    <description>Read ActiveTargetGroup</description>
+    <message>Authorization required to read the active target group.</message>
+    <defaults>
+      <allow_any>yes</allow_any>
+      <allow_inactive>yes</allow_inactive>
+      <allow_active>yes</allow_active>
+    </defaults>
+  </action>
+
+  <action id="org.shadowblip.InputPlumber.SetActiveTargetGroup">
+    <description>Modify ActiveTargetGroup</description>
+    <message>Authorization required to choose which target group receives gamepad input.</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+  </action>
+
+  <action id="org.shadowblip.InputPlumber.AddTargetGroup">
+    <description>Add a target group</description>
+    <message>Authorization required to add a target group.</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+  </action>
+
+  <action id="org.shadowblip.InputPlumber.RemoveTargetGroup">
+    <description>Remove a target group</description>
+    <message>Authorization required to remove a target group.</message>
+    <defaults>
+      <allow_any>no</allow_any>
+      <allow_inactive>auth_admin</allow_inactive>
+      <allow_active>auth_admin</allow_active>
+    </defaults>
+  </action>
+
   <action id="org.shadowblip.InputPlumber.CreateCompositeDevice">
     <description>Create a composite device</description>
     <message>Authorization required to create a composite device.</message>

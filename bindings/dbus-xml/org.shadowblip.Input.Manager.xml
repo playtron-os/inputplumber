@@ -75,7 +75,33 @@
      -->
     <method name="HookWake">
     </method>
+    <!--
+     Add a target group: every composite device creates its gamepads, at
+     rest unless the group is active. Adding an existing group does nothing.
+     -->
+    <method name="AddTargetGroup">
+      <arg name="name" type="s" direction="in"/>
+    </method>
+    <!--
+     Remove a target group and its gamepads. The active group can only be
+     removed last. Removing a group that does not exist does nothing.
+     -->
+    <method name="RemoveTargetGroup">
+      <arg name="name" type="s" direction="in"/>
+    </method>
     <property name="GamepadOrder" type="as" access="readwrite"/>
+    <!--
+     Target groups: named sets of gamepad target devices. Every composite
+     device keeps one gamepad of each gamepad target type per group, and
+     only the active group's gamepads receive input; the others stay
+     connected and at rest. Empty means no groups, one set of targets.
+     -->
+    <property name="TargetGroups" type="as" access="read"/>
+    <!--
+     The target group whose gamepads receive input, or "" when there are
+     no groups. Setting a group that does not exist adds it first.
+     -->
+    <property name="ActiveTargetGroup" type="s" access="readwrite"/>
     <!--
      If set to 'true', InputPlumber will try to manage all input devices
      on the system that have a Composite Device configuration.

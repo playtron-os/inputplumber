@@ -99,6 +99,56 @@ busctl set-property org.shadowblip.InputPlumber \
   InterceptMode u 2
 ```
 
+### Target Groups
+
+Target groups let several sessions, sandboxes or containers each have their
+own virtual gamepad from the same physical controller. Only the session in
+front gets the input. The others keep their gamepad connected and at rest, so
+a game in the background sees an idle controller instead of an unplugged one.
+
+Each composite device keeps one gamepad of each gamepad target type per group.
+Only the gamepads of the `ActiveTargetGroup` receive input. Switching groups
+leaves the old group's gamepads with every button released and every axis
+centred. Keyboard, mouse, touchpad, touchscreen and DBus targets are shared by
+all groups, because a compositor already sends those to whatever is in front.
+Intercept mode applies to the active group's gamepads as before.
+
+Groups are managed on the Manager (`/org/shadowblip/InputPlumber/Manager`):
+
+- `AddTargetGroup(s)` and `RemoveTargetGroup(s)`. The active group can only be
+  removed last.
+- `ActiveTargetGroup` (read/write). Setting a group that does not exist adds it
+  first.
+- `TargetGroups` (read).
+
+With no groups, InputPlumber creates one set of targets per device, as it
+always has. Groups and the active one are kept in
+`/run/inputplumber/target-groups` across daemon restarts.
+
+```bash
+busctl call org.shadowblip.InputPlumber /org/shadowblip/InputPlumber/Manager \
+  org.shadowblip.InputManager AddTargetGroup s desktop
+busctl set-property org.shadowblip.InputPlumber /org/shadowblip/InputPlumber/Manager \
+  org.shadowblip.InputManager ActiveTargetGroup s game
+```
+
+A group's gamepads have the physical path `inputplumber/group/<name>`.
+InputPlumber keeps one view of `/dev/input` per group in
+`/dev/inputplumber/groups/<name>/`. The view holds hard links of every node in
+`/dev/input` except other groups' gamepads, so virtual gamepads made by other
+software, such as Steam Input's, stay visible. Bind a group's directory, not
+its nodes, as a sandbox's `/dev/input`, and gamepads plugged in later appear
+there.
+
+A grouped gamepad's hidraw node cannot be shown to one group alone, because it
+sits directly in `/dev`. The `71-inputplumber-target-groups.rules` udev rule
+closes those nodes to everyone, so grouped gamepads are read through evdev. The
+`deck` target is a USB device whose physical path the kernel sets, so it cannot
+carry a group; use `deck-uhid` with groups.
+
+The `inputplumber-client` crate in `client/` is an MIT-licensed zbus client
+for the Manager interface, groups included.
+
 ### Virtual Keyboard
 
 When InputPlumber is running, a virtual keyboard is created that is used for

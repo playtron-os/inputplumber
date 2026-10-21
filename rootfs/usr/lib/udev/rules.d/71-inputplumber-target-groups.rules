@@ -1,0 +1,10 @@
+# Target groups (the Manager's TargetGroups and ActiveTargetGroup): each
+# group's gamepads are meant to be read through that group's view of
+# /dev/input in /dev/inputplumber/groups. A grouped gamepad's hidraw node sits
+# in /dev itself, which every sandbox shares, so it cannot be given to one
+# group alone: it is closed to everyone, and the gamepad is read through evdev.
+ACTION=="remove", GOTO="inputplumber_target_groups_end"
+SUBSYSTEM!="hidraw", GOTO="inputplumber_target_groups_end"
+IMPORT{parent}="HID_PHYS"
+ENV{HID_PHYS}=="inputplumber/group/*", MODE="0000", GROUP="root", TAG-="uaccess"
+LABEL="inputplumber_target_groups_end"
