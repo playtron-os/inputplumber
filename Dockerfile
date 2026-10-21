@@ -20,3 +20,9 @@ RUN rustup component add clippy
 ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc
 ENV CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc
 ENV CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++
+
+# Gives the uid a build runs as a passwd entry: see the script.
+RUN chmod 0666 /etc/passwd /etc/group
+COPY pkg/docker/entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod 0755 /usr/local/bin/entrypoint.sh
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
