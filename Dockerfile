@@ -2,6 +2,7 @@ FROM rust:1.92
 
 RUN dpkg --add-architecture arm64
 RUN apt-get update && apt-get install -y \
+  dbus-daemon \
   zstd \
   libclang-dev \
   libudev-dev \

@@ -128,6 +128,24 @@ group. Any other caller may change only the groups named after its uid,
 `AccessDenied`, so one user cannot take another's gamepads or remove their
 groups.
 
+polkit tells callers apart by user and session only. To let one program of a
+user change groups and not the user's other programs, name its systemd unit in
+`/etc/inputplumber/inputplumber.yaml`:
+
+```yaml
+target_group_writers:
+  - kora-workspaces.service
+```
+
+Then a caller other than root must also run in one of these units, of its own
+user manager or of the system, or it gets `AccessDenied`. The unit is read from
+the caller's cgroup, through the pidfd the bus hands over where it has one.
+The file is read at each change, so editing it needs no restart. Without the
+file, or with an empty list, any unit may. A file that cannot be read or parsed
+refuses every caller but root. A process of the same user can still move itself
+into a listed unit, because a user owns their own cgroups: this keeps the
+user's other programs out by default, and is no boundary against them.
+
 With no groups, InputPlumber creates one set of targets per device, as it
 always has. Groups and the active one are kept in
 `/run/inputplumber/target-groups` across daemon restarts.

@@ -1,3 +1,4 @@
+pub mod caller;
 pub mod interface;
 pub mod polkit;
 #[cfg(test)]

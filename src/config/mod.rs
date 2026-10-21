@@ -2,6 +2,7 @@ pub mod capability_map;
 #[cfg(test)]
 pub mod config_test;
 pub mod path;
+pub mod settings;
 
 use std::io::{self, Read};
 

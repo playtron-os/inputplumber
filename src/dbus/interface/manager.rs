@@ -1,15 +1,16 @@
-use std::time::Duration;
+use std::{path::PathBuf, time::Duration};
 
 use tokio::sync::mpsc;
-use zbus::{
-    fdo, message::Header, names::BusName, proxy::CacheProperties, Connection, DBusError, Message,
-};
+use zbus::{fdo, message::Header, Connection, DBusError, Message};
 use zbus_macros::interface;
 
 use crate::{
-    config::{CompositeDeviceConfig, LoadError},
+    config::{
+        settings::{Settings, SETTINGS_PATH},
+        CompositeDeviceConfig, LoadError,
+    },
     constants::BUS_PREFIX,
-    dbus::{interface::Unregisterable, polkit::check_polkit},
+    dbus::{caller, interface::Unregisterable, polkit::check_polkit},
     input::{
         manager::ManagerCommand,
         target::TargetDeviceTypeId,
@@ -24,6 +25,10 @@ pub struct ManagerInterface {
     tx: mpsc::Sender<ManagerCommand>,
     gamepad_order: Vec<String>,
     target_groups: TargetGroups,
+    /// InputPlumber's own settings, read at each target group change.
+    settings: PathBuf,
+    /// Where callers' processes are looked up: `/proc`.
+    proc: PathBuf,
 }
 
 impl ManagerInterface {
@@ -32,13 +37,17 @@ impl ManagerInterface {
             tx,
             gamepad_order: Default::default(),
             target_groups,
+            settings: PathBuf::from(SETTINGS_PATH),
+            proc: PathBuf::from("/proc"),
         }
     }
 
-    /// Refuse a caller a target group that is not theirs: see
-    /// [target_group::may_change]. Without a header the call comes from the
-    /// daemon itself, not the bus.
-    async fn check_group_owner(
+    /// Refuse a caller a change to the target group `name` unless it is root,
+    /// or the group is theirs ([target_group::may_change]) and they run in one
+    /// of the units the settings name ([Settings::target_group_writers]).
+    /// Without a header the call comes from the daemon itself, not the bus.
+    async fn check_group_change(
+        &self,
         conn: &Connection,
         hdr: Option<&Header<'_>>,
         name: &str,
@@ -47,21 +56,49 @@ impl ManagerInterface {
         let Some(hdr) = hdr else {
             return Ok(());
         };
-        let sender = hdr
-            .sender()
-            .ok_or_else(|| fdo::Error::AccessDenied("Missing sender".into()))?;
-        let uid = fdo::DBusProxy::builder(conn)
-            .cache_properties(CacheProperties::No)
-            .build()
-            .await?
-            .get_connection_unix_user(BusName::from(sender.to_owned()))
-            .await?;
-        if target_group::may_change(uid, name) {
+        let creds = caller::credentials(conn, hdr).await?;
+        let uid = creds.unix_user_id().ok_or_else(|| {
+            fdo::Error::AccessDenied("The bus gave no user for the caller".into())
+        })?;
+        if !target_group::may_change(uid, name) {
+            return Err(fdo::Error::AccessDenied(format!(
+                "Target group '{name}' is not yours: user {uid} may only change groups named '{uid}-…'"
+            )));
+        }
+        if uid == 0 {
             return Ok(());
         }
+        let writers = Settings::load(&self.settings)
+            .map_err(|e| {
+                log::error!("Refusing target group changes: unreadable settings: {e}");
+                fdo::Error::AccessDenied(format!(
+                    "Target groups cannot be changed: InputPlumber's settings are unreadable: {e}"
+                ))
+            })?
+            .target_group_writers;
+        if writers.is_empty() {
+            return Ok(());
+        }
+        let unit = caller::cgroup(&self.proc, &creds)
+            .ok()
+            .and_then(|cgroup| caller::unit_of(&cgroup, uid));
+        if caller::is_writer(&writers, unit.as_deref()) {
+            return Ok(());
+        }
+        let from = unit.map_or_else(|| "no unit".to_string(), |unit| format!("unit '{unit}'"));
+        log::info!("Refused a target group change to '{name}' from user {uid} in {from}");
         Err(fdo::Error::AccessDenied(format!(
-            "Target group '{name}' is not yours: user {uid} may only change groups named '{uid}-…'"
+            "Target groups are changed only by {}: the caller runs in {from}",
+            writers.join(", ")
         )))
+    }
+
+    /// The interface with its settings and `/proc` elsewhere, for a test.
+    #[cfg(test)]
+    pub fn with_files(mut self, settings: impl Into<PathBuf>, proc: impl Into<PathBuf>) -> Self {
+        self.settings = settings.into();
+        self.proc = proc.into();
+        self
     }
 
     /// An error from a `&self` property setter, with its DBus name kept: zbus
@@ -163,7 +200,8 @@ impl ManagerInterface {
 
     /// The target group whose gamepads receive input, or "" when there are
     /// no groups. Setting a group that does not exist adds it first. Only
-    /// root may set a group not named after the caller's uid (`<uid>-…`).
+    /// root may set a group not named after the caller's uid (`<uid>-…`);
+    /// with `target_group_writers` set, only callers in those units may.
     #[zbus(property)]
     async fn active_target_group(
         &self,
@@ -182,7 +220,7 @@ impl ManagerInterface {
         #[zbus(header)] hdr: Option<Header<'_>>,
     ) -> zbus::Result<()> {
         let set = async {
-            Self::check_group_owner(conn, hdr.as_ref(), &name).await?;
+            self.check_group_change(conn, hdr.as_ref(), &name).await?;
             check_polkit(
                 conn,
                 hdr.clone(),
@@ -198,14 +236,15 @@ impl ManagerInterface {
 
     /// Add a target group: every composite device creates its gamepads, at
     /// rest unless the group is active. Adding an existing group does nothing.
-    /// Only root may add a group not named after the caller's uid (`<uid>-…`).
+    /// Only root may add a group not named after the caller's uid (`<uid>-…`);
+    /// with `target_group_writers` set, only callers in those units may.
     async fn add_target_group(
         &self,
         name: String,
         #[zbus(connection)] conn: &Connection,
         #[zbus(header)] hdr: Header<'_>,
     ) -> fdo::Result<()> {
-        Self::check_group_owner(conn, Some(&hdr), &name).await?;
+        self.check_group_change(conn, Some(&hdr), &name).await?;
         check_polkit(
             conn,
             Some(hdr),
@@ -218,14 +257,15 @@ impl ManagerInterface {
 
     /// Remove a target group and its gamepads. The active group can only be
     /// removed last. Removing a group that does not exist does nothing. Only
-    /// root may remove a group not named after the caller's uid (`<uid>-…`).
+    /// root may remove a group not named after the caller's uid (`<uid>-…`);
+    /// with `target_group_writers` set, only callers in those units may.
     async fn remove_target_group(
         &self,
         name: String,
         #[zbus(connection)] conn: &Connection,
         #[zbus(header)] hdr: Header<'_>,
     ) -> fdo::Result<()> {
-        Self::check_group_owner(conn, Some(&hdr), &name).await?;
+        self.check_group_change(conn, Some(&hdr), &name).await?;
         check_polkit(
             conn,
             Some(hdr),
@@ -549,3 +589,7 @@ impl ManagerInterface {
 }
 
 impl Unregisterable for ManagerInterface {}
+
+#[cfg(test)]
+#[path = "manager_test.rs"]
+mod tests;
