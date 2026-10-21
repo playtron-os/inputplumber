@@ -55,6 +55,19 @@ pub fn validate_name(name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether the user `uid` may add, remove or activate the group `name`. Root
+/// may change any group; anyone else only their own, named `<uid>-<rest>`, so
+/// one user can neither take the gamepads from another nor drop their groups.
+pub fn may_change(uid: u32, name: &str) -> bool {
+    if validate_name(name).is_err() {
+        return false;
+    }
+    uid == 0
+        || name
+            .strip_prefix(&format!("{uid}-"))
+            .is_some_and(|rest| !rest.is_empty())
+}
+
 /// The `phys` given to a gamepad target of the given group.
 pub fn phys_for(group: &str) -> String {
     format!("{PHYS_PREFIX}{group}")

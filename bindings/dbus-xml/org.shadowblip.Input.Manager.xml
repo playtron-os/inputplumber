@@ -78,13 +78,15 @@
     <!--
      Add a target group: every composite device creates its gamepads, at
      rest unless the group is active. Adding an existing group does nothing.
+     Only root may add a group not named after the caller's uid (`<uid>-…`).
      -->
     <method name="AddTargetGroup">
       <arg name="name" type="s" direction="in"/>
     </method>
     <!--
      Remove a target group and its gamepads. The active group can only be
-     removed last. Removing a group that does not exist does nothing.
+     removed last. Removing a group that does not exist does nothing. Only
+     root may remove a group not named after the caller's uid (`<uid>-…`).
      -->
     <method name="RemoveTargetGroup">
       <arg name="name" type="s" direction="in"/>
@@ -99,7 +101,8 @@
     <property name="TargetGroups" type="as" access="read"/>
     <!--
      The target group whose gamepads receive input, or "" when there are
-     no groups. Setting a group that does not exist adds it first.
+     no groups. Setting a group that does not exist adds it first. Only
+     root may set a group not named after the caller's uid (`<uid>-…`).
      -->
     <property name="ActiveTargetGroup" type="s" access="readwrite"/>
     <!--

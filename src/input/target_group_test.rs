@@ -91,6 +91,41 @@ fn names_are_checked() {
 }
 
 #[test]
+fn a_user_changes_only_their_own_groups() {
+    assert!(may_change(1000, "1000-default"));
+    assert!(may_change(1000, "1000-gameframe.2"));
+    // Another user's, or one that only looks like it.
+    for theirs in [
+        "1001-default",
+        "100-default",
+        "10000-default",
+        "01000-default",
+    ] {
+        assert!(!may_change(1000, theirs), "{theirs}");
+    }
+    // Malformed: no workspace part, no uid, or not a usable name at all.
+    for bad in [
+        "", "1000", "1000-", "-default", "default", "1000-a/b", "1000 -x",
+    ] {
+        assert!(!may_change(1000, bad), "{bad}");
+    }
+    assert!(!may_change(
+        1000,
+        &format!("1000-{}", "x".repeat(MAX_NAME_LEN))
+    ));
+}
+
+#[test]
+fn root_changes_any_group_with_a_usable_name() {
+    for any in ["1000-default", "1001-gameframe", "desktop"] {
+        assert!(may_change(0, any), "{any}");
+    }
+    for bad in ["", "..", "a/b", "0-x y"] {
+        assert!(!may_change(0, bad), "{bad}");
+    }
+}
+
+#[test]
 fn the_phys_carries_the_group() {
     let phys = phys_for("1000-gameframe");
     assert!(phys.len() <= 64);

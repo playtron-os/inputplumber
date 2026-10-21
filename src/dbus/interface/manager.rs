@@ -1,14 +1,20 @@
 use std::time::Duration;
 
 use tokio::sync::mpsc;
-use zbus::{fdo, message::Header, Connection};
+use zbus::{
+    fdo, message::Header, names::BusName, proxy::CacheProperties, Connection, DBusError, Message,
+};
 use zbus_macros::interface;
 
 use crate::{
     config::{CompositeDeviceConfig, LoadError},
     constants::BUS_PREFIX,
     dbus::{interface::Unregisterable, polkit::check_polkit},
-    input::{manager::ManagerCommand, target::TargetDeviceTypeId, target_group::TargetGroups},
+    input::{
+        manager::ManagerCommand,
+        target::TargetDeviceTypeId,
+        target_group::{self, TargetGroups},
+    },
 };
 
 /// The [ManagerInterface] provides a DBus interface that can be exposed for managing
@@ -26,6 +32,49 @@ impl ManagerInterface {
             tx,
             gamepad_order: Default::default(),
             target_groups,
+        }
+    }
+
+    /// Refuse a caller a target group that is not theirs: see
+    /// [target_group::may_change]. Without a header the call comes from the
+    /// daemon itself, not the bus.
+    async fn check_group_owner(
+        conn: &Connection,
+        hdr: Option<&Header<'_>>,
+        name: &str,
+    ) -> fdo::Result<()> {
+        target_group::validate_name(name).map_err(fdo::Error::InvalidArgs)?;
+        let Some(hdr) = hdr else {
+            return Ok(());
+        };
+        let sender = hdr
+            .sender()
+            .ok_or_else(|| fdo::Error::AccessDenied("Missing sender".into()))?;
+        let uid = fdo::DBusProxy::builder(conn)
+            .cache_properties(CacheProperties::No)
+            .build()
+            .await?
+            .get_connection_unix_user(BusName::from(sender.to_owned()))
+            .await?;
+        if target_group::may_change(uid, name) {
+            return Ok(());
+        }
+        Err(fdo::Error::AccessDenied(format!(
+            "Target group '{name}' is not yours: user {uid} may only change groups named '{uid}-…'"
+        )))
+    }
+
+    /// An error from a `&self` property setter, with its DBus name kept: zbus
+    /// answers a plain [fdo::Error] from one as `org.freedesktop.zbus.Error`.
+    fn setter_error(hdr: Option<&Header<'_>>, error: fdo::Error) -> zbus::Error {
+        let name = DBusError::name(&error);
+        let description = DBusError::description(&error).map(str::to_string);
+        let reply = hdr.map(|hdr| {
+            Message::error(hdr, name.clone())?.build(&(description.as_deref().unwrap_or(""),))
+        });
+        match reply {
+            Some(Ok(reply)) => zbus::Error::MethodError(name.into(), description, reply),
+            _ => error.into(),
         }
     }
 
@@ -113,7 +162,8 @@ impl ManagerInterface {
     }
 
     /// The target group whose gamepads receive input, or "" when there are
-    /// no groups. Setting a group that does not exist adds it first.
+    /// no groups. Setting a group that does not exist adds it first. Only
+    /// root may set a group not named after the caller's uid (`<uid>-…`).
     #[zbus(property)]
     async fn active_target_group(
         &self,
@@ -131,25 +181,31 @@ impl ManagerInterface {
         #[zbus(connection)] conn: &Connection,
         #[zbus(header)] hdr: Option<Header<'_>>,
     ) -> zbus::Result<()> {
-        check_polkit(
-            conn,
-            hdr,
-            "org.shadowblip.InputPlumber.SetActiveTargetGroup",
-        )
-        .await?;
-        self.ask_about_group(|sender| ManagerCommand::SetActiveTargetGroup { name, sender })
-            .await
-            .map_err(zbus::Error::from)
+        let set = async {
+            Self::check_group_owner(conn, hdr.as_ref(), &name).await?;
+            check_polkit(
+                conn,
+                hdr.clone(),
+                "org.shadowblip.InputPlumber.SetActiveTargetGroup",
+            )
+            .await?;
+            self.ask_about_group(|sender| ManagerCommand::SetActiveTargetGroup { name, sender })
+                .await
+        };
+        set.await
+            .map_err(|error| Self::setter_error(hdr.as_ref(), error))
     }
 
     /// Add a target group: every composite device creates its gamepads, at
     /// rest unless the group is active. Adding an existing group does nothing.
+    /// Only root may add a group not named after the caller's uid (`<uid>-…`).
     async fn add_target_group(
         &self,
         name: String,
         #[zbus(connection)] conn: &Connection,
         #[zbus(header)] hdr: Header<'_>,
     ) -> fdo::Result<()> {
+        Self::check_group_owner(conn, Some(&hdr), &name).await?;
         check_polkit(
             conn,
             Some(hdr),
@@ -161,13 +217,15 @@ impl ManagerInterface {
     }
 
     /// Remove a target group and its gamepads. The active group can only be
-    /// removed last. Removing a group that does not exist does nothing.
+    /// removed last. Removing a group that does not exist does nothing. Only
+    /// root may remove a group not named after the caller's uid (`<uid>-…`).
     async fn remove_target_group(
         &self,
         name: String,
         #[zbus(connection)] conn: &Connection,
         #[zbus(header)] hdr: Header<'_>,
     ) -> fdo::Result<()> {
+        Self::check_group_owner(conn, Some(&hdr), &name).await?;
         check_polkit(
             conn,
             Some(hdr),

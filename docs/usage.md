@@ -121,15 +121,22 @@ Groups are managed on the Manager (`/org/shadowblip/InputPlumber/Manager`):
   first.
 - `TargetGroups` (read).
 
+Changing groups needs polkit's `AddTargetGroup`, `RemoveTargetGroup` or
+`SetActiveTargetGroup` action, and ownership of the group. Root may change any
+group. Any other caller may change only the groups named after its uid,
+`<uid>-<rest>`, such as `1000-desktop`. Other names are refused with
+`AccessDenied`, so one user cannot take another's gamepads or remove their
+groups.
+
 With no groups, InputPlumber creates one set of targets per device, as it
 always has. Groups and the active one are kept in
 `/run/inputplumber/target-groups` across daemon restarts.
 
 ```bash
 busctl call org.shadowblip.InputPlumber /org/shadowblip/InputPlumber/Manager \
-  org.shadowblip.InputManager AddTargetGroup s desktop
+  org.shadowblip.InputManager AddTargetGroup s "$(id -u)-desktop"
 busctl set-property org.shadowblip.InputPlumber /org/shadowblip/InputPlumber/Manager \
-  org.shadowblip.InputManager ActiveTargetGroup s game
+  org.shadowblip.InputManager ActiveTargetGroup s "$(id -u)-game"
 ```
 
 A group's gamepads have the physical path `inputplumber/group/<name>`. For
