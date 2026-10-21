@@ -168,18 +168,16 @@ async fn change(client: &Connection, how: &str, group: &str) -> Result<(), (Stri
         Err(zbus::Error::MethodError(name, message, _)) => {
             Err((name.to_string(), message.unwrap_or_default()))
         }
-        Err(e) => panic!("{how} {group}: {e}"),
+        Err(e) => panic!("{how}: {e}"),
     }
 }
 
 /// Every one of `group`'s changes refused with AccessDenied, with `why` in it.
 async fn refused(client: &Connection, group: &str, why: &str) {
     for how in ["add", "activate", "remove"] {
-        let (name, message) = change(client, how, group)
-            .await
-            .expect_err(&format!("{how} {group} was allowed"));
-        assert_eq!(name, ACCESS_DENIED, "{how} {group}: {message}");
-        assert!(message.contains(why), "{how} {group}: {message}");
+        let (name, message) = change(client, how, group).await.expect_err(how);
+        assert_eq!(name, ACCESS_DENIED, "{how}: {message}");
+        assert!(message.contains(why), "{how}: {message}");
     }
 }
 
@@ -188,7 +186,7 @@ async fn allowed(client: &Connection, group: &str) {
     for how in ["add", "activate", "remove"] {
         change(client, how, group)
             .await
-            .unwrap_or_else(|e| panic!("{how} {group}: {e:?}"));
+            .unwrap_or_else(|e| panic!("{how}: {e:?}"));
     }
 }
 

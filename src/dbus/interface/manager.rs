@@ -86,7 +86,7 @@ impl ManagerInterface {
             return Ok(());
         }
         let from = unit.map_or_else(|| "no unit".to_string(), |unit| format!("unit '{unit}'"));
-        log::info!("Refused a target group change to '{name}' from user {uid} in {from}");
+        log::info!("Refused a change to target group '{name}' from {from}");
         Err(fdo::Error::AccessDenied(format!(
             "Target groups are changed only by {}: the caller runs in {from}",
             writers.join(", ")
