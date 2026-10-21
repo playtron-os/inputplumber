@@ -1,0 +1,69 @@
+# Keeps this fork's main up to date with ShadowBlip/InputPlumber's main.
+# A fast-forward is pushed straight to main; once main carries our own commits,
+# upstream is merged on a branch and offered as a pull request for review; a
+# conflicting merge fails the run with the files to resolve by hand.
+name: "🔄 Sync upstream"
+
+on:
+  schedule:
+    - cron: "17 6 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    name: Merge upstream main
+    runs-on: ubuntu-latest
+    if: github.repository == 'playtron-os/inputplumber'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream https://github.com/ShadowBlip/InputPlumber.git
+          git fetch upstream main
+
+      - name: Fast-forward main, or open a merge pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if git merge-base --is-ancestor upstream/main HEAD; then
+            echo "main already has upstream $(git rev-parse --short upstream/main)" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if git merge-base --is-ancestor HEAD upstream/main; then
+            git push origin upstream/main:main
+            echo "Fast-forwarded main to upstream $(git rev-parse --short upstream/main)" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          branch="sync/upstream-$(git rev-parse --short upstream/main)"
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
+            echo "$branch is already open for review" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$branch"
+          if ! git merge --no-edit upstream/main; then
+            {
+              echo "Merging upstream $(git rev-parse --short upstream/main) conflicts with our commits in:"
+              git diff --name-only --diff-filter=U | sed 's/^/- /'
+              echo "Merge it by hand on a branch and open a pull request."
+            } >> "$GITHUB_STEP_SUMMARY"
+            git merge --abort
+            exit 1
+          fi
+          git push origin "$branch"
+          gh pr create --base main --head "$branch" --title "chore: merge upstream InputPlumber main" \
+            --body "Merges ShadowBlip/InputPlumber main ($(git rev-parse --short upstream/main)) into our fork. It merged without conflicts; review and merge."
+          echo "Opened a pull request from $branch" >> "$GITHUB_STEP_SUMMARY"
