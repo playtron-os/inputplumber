@@ -382,3 +382,161 @@ fn an_inactive_gamepad_never_rumbles_or_lights_the_controller() {
     let led = OutputEvent::Evdev(evdev::InputEvent::new(evdev::EventType::LED.0, 0, 1));
     assert!(!reaches_controller_when_inactive(&led));
 }
+
+/// A sysfs tree laid out like the test laptop's with a DualSense plugged in
+/// and two groups: the controller itself (hidden by InputPlumber), its UHID
+/// DualSense target in each group, InputPlumber's shared keyboard, and an
+/// `xbox-elite` uinput target, which carries the group in its own `phys`.
+struct Sysfs {
+    root: PathBuf,
+}
+
+impl Sysfs {
+    fn new(scratch: &Scratch) -> Self {
+        let sysfs = Self {
+            root: scratch.0.join("sys"),
+        };
+        fs::create_dir_all(sysfs.root.join("class/input")).unwrap();
+        let usb = "devices/pci0000:00/0000:00:08.1/usb1/1-2/1-2:1.3/0003:054C:0CE6.0003";
+        sysfs.hid(usb, "usb-0000:07:00.3-2/input3");
+        sysfs.input(
+            usb,
+            "input104",
+            "usb-0000:07:00.3-2/input3",
+            &["event14", "js0"],
+        );
+        sysfs.dualsense(
+            5,
+            "1000-default",
+            110,
+            &["event20", "js2", "event22", "event24", "mouse4"],
+        );
+        sysfs.dualsense(
+            4,
+            "1000-gameframe",
+            111,
+            &["event21", "js3", "event23", "event25", "mouse5"],
+        );
+        sysfs.input("devices/virtual", "input100", "", &["event18"]);
+        sysfs.input(
+            "devices/virtual",
+            "input120",
+            &phys_for("1000-gameframe"),
+            &["event30", "js6"],
+        );
+        sysfs.node("devices/virtual/input", "mice");
+        sysfs
+    }
+
+    /// A UHID DualSense target: the HID device carries the group, and the
+    /// kernel driver leaves its input devices' `phys` empty.
+    fn dualsense(&self, hid: u32, group: &str, input: u32, nodes: &[&str]) {
+        let dir = format!("devices/virtual/misc/uhid/0003:054C:0CE6.{hid:04X}");
+        self.hid(&dir, &phys_for(group));
+        self.input(&dir, &format!("input{input}"), "", nodes);
+    }
+
+    fn hid(&self, dir: &str, phys: &str) {
+        let dir = self.root.join(dir);
+        fs::create_dir_all(&dir).unwrap();
+        let uevent =
+            format!("DRIVER=playstation\nHID_ID=0003:0000054C:00000CE6\nHID_PHYS={phys}\n");
+        fs::write(dir.join("uevent"), uevent).unwrap();
+    }
+
+    fn input(&self, parent: &str, input: &str, phys: &str, nodes: &[&str]) {
+        let dir = format!("{parent}/input/{input}");
+        fs::create_dir_all(self.root.join(&dir)).unwrap();
+        fs::write(self.root.join(&dir).join("phys"), format!("{phys}\n")).unwrap();
+        for node in nodes {
+            self.node(&dir, node);
+        }
+    }
+
+    fn node(&self, dir: &str, node: &str) {
+        let path = self.root.join(dir).join(node);
+        fs::create_dir_all(&path).unwrap();
+        fs::write(path.join("uevent"), format!("DEVNAME=input/{node}\n")).unwrap();
+        std::os::unix::fs::symlink(
+            format!("../../{dir}/{node}"),
+            self.root.join("class/input").join(node),
+        )
+        .unwrap();
+    }
+
+    fn owner(&self) -> impl Fn(&str) -> Option<String> + '_ {
+        |node| group_of_input_node(&self.root, node)
+    }
+}
+
+#[test]
+fn a_node_belongs_to_the_group_named_up_its_device_tree() {
+    let scratch = Scratch::new();
+    let sysfs = Sysfs::new(&scratch);
+    let group = |node| group_of_input_node(&sysfs.root, node);
+
+    // Every node of a UHID DualSense target, through its HID device.
+    for node in ["event20", "js2", "event22", "event24", "mouse4"] {
+        assert_eq!(group(node).as_deref(), Some("1000-default"), "{node}");
+    }
+    for node in ["event21", "js3", "event23", "event25", "mouse5"] {
+        assert_eq!(group(node).as_deref(), Some("1000-gameframe"), "{node}");
+    }
+    // A uinput target, through its own phys.
+    assert_eq!(group("event30").as_deref(), Some("1000-gameframe"));
+    assert_eq!(group("js6").as_deref(), Some("1000-gameframe"));
+    // Everything else is shared.
+    for node in ["event14", "js0", "event18", "mice", "event99", "../event20"] {
+        assert_eq!(group(node), None, "{node}");
+    }
+}
+
+#[test]
+fn a_view_never_holds_another_groups_dualsense() {
+    let scratch = Scratch::new();
+    let sysfs = Sysfs::new(&scratch);
+    let input = scratch.0.join("input");
+    fs::create_dir_all(&input).unwrap();
+    let nodes = fs::read_dir(sysfs.root.join("class/input")).unwrap();
+    for node in nodes.flatten() {
+        fs::write(input.join(node.file_name()), "").unwrap();
+    }
+    let mut views = GroupViews::new(scratch.0.join("groups"), &input);
+    views
+        .set_groups(&names(&["1000-default", "1000-gameframe"]), sysfs.owner())
+        .unwrap();
+
+    let shared = ["event14", "event18", "js0", "mice"];
+    let default = ["event20", "event22", "event24", "js2", "mouse4"];
+    let gameframe = [
+        "event21", "event23", "event25", "event30", "js3", "js6", "mouse5",
+    ];
+    let expected = |own: &[&str]| {
+        let mut all: Vec<String> = shared.iter().chain(own).map(|s| s.to_string()).collect();
+        all.sort();
+        all
+    };
+    assert_eq!(listing(&views.path_of("1000-default")), expected(&default));
+    assert_eq!(
+        listing(&views.path_of("1000-gameframe")),
+        expected(&gameframe)
+    );
+
+    // A second DualSense connects later: its pads show in their own views only.
+    sysfs.dualsense(7, "1000-default", 130, &["event40", "js8"]);
+    sysfs.dualsense(6, "1000-gameframe", 131, &["event41", "js9"]);
+    for node in ["event40", "js8", "event41", "js9"] {
+        fs::write(input.join(node), "").unwrap();
+        views.node_added(node, sysfs.owner()(node).as_deref());
+    }
+    let default_view = listing(&views.path_of("1000-default"));
+    let gameframe_view = listing(&views.path_of("1000-gameframe"));
+    for node in ["event40", "js8"] {
+        assert!(default_view.iter().any(|n| n == node), "{node}");
+        assert!(!gameframe_view.iter().any(|n| n == node), "{node}");
+    }
+    for node in ["event41", "js9"] {
+        assert!(gameframe_view.iter().any(|n| n == node), "{node}");
+        assert!(!default_view.iter().any(|n| n == node), "{node}");
+    }
+}

@@ -2108,8 +2108,5 @@ fn input_node_name(devnode: &str) -> Option<&str> {
 /// The target group a node in /dev/input belongs to, from its device's
 /// physical path. Nodes of other devices belong to no group.
 fn input_node_group(node: &str) -> Option<String> {
-    let device =
-        ::udev::Device::from_subsystem_sysname("input".to_string(), node.to_string()).ok()?;
-    let phys = device.get_attribute_from_tree("phys");
-    target_group::group_of_phys(&phys).map(str::to_string)
+    target_group::group_of_input_node(std::path::Path::new("/sys"), node)
 }

@@ -132,7 +132,9 @@ busctl set-property org.shadowblip.InputPlumber /org/shadowblip/InputPlumber/Man
   org.shadowblip.InputManager ActiveTargetGroup s game
 ```
 
-A group's gamepads have the physical path `inputplumber/group/<name>`.
+A group's gamepads have the physical path `inputplumber/group/<name>`. For
+a UHID gamepad it is the HID device's (`HID_PHYS`): some kernel drivers, such
+as the DualSense's, leave the input devices' own physical path empty.
 InputPlumber keeps one view of `/dev/input` per group in
 `/dev/inputplumber/groups/<name>/`. The view holds hard links of every node in
 `/dev/input` except other groups' gamepads, so virtual gamepads made by other

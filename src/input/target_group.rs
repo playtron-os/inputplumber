@@ -66,6 +66,31 @@ pub fn group_of_phys(phys: &str) -> Option<&str> {
         .filter(|name| validate_name(name).is_ok())
 }
 
+/// The group an input node belongs to, read from the sysfs mounted at `sys`:
+/// the first device up its tree whose `phys` attribute or `HID_PHYS` names a
+/// group. A UHID gamepad needs the latter: its kernel driver may leave the
+/// input device's own `phys` empty (hid-playstation does).
+pub fn group_of_input_node(sys: &Path, node: &str) -> Option<String> {
+    if !is_node_name(node) {
+        return None;
+    }
+    let devices = fs::canonicalize(sys.join("devices")).ok()?;
+    let mut dir = fs::canonicalize(sys.join("class/input").join(node)).ok()?;
+    while dir.starts_with(&devices) && dir != devices {
+        let phys = fs::read_to_string(dir.join("phys")).unwrap_or_default();
+        if let Some(group) = group_of_phys(phys.trim_end()) {
+            return Some(group.to_string());
+        }
+        let uevent = fs::read_to_string(dir.join("uevent")).unwrap_or_default();
+        let hid_phys = uevent.lines().find_map(|l| l.strip_prefix("HID_PHYS="));
+        if let Some(group) = hid_phys.and_then(group_of_phys) {
+            return Some(group.to_string());
+        }
+        dir.pop();
+    }
+    None
+}
+
 /// The persistent id of a group's gamepad: distinct per group, so targets
 /// that derive a serial or MAC address from it never collide (the kernel's
 /// DualSense driver refuses a second device with the same address).
