@@ -1,0 +1,16 @@
+[package]
+name = "inputplumber-client"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "DBus client for InputPlumber's Manager interface, including target groups"
+repository = "https://github.com/playtron-os/inputplumber.git"
+readme = "README.md"
+
+[dependencies]
+zbus = { version = "5", default-features = false, features = ["tokio"] }
+
+[dev-dependencies]
+# The tests serve a fake Manager over a socket pair, without a bus.
+zbus = { version = "5", default-features = false, features = ["tokio", "p2p"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net"] }
