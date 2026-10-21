@@ -223,6 +223,9 @@ impl CompositeDeviceTargets {
                 target_devices.remove(path);
             }
         }
+        if !targets_to_stop.is_empty() {
+            self.signal_targets_changed().await;
+        }
 
         self.target_creation_in_progress = true;
 
@@ -399,7 +402,10 @@ impl CompositeDeviceTargets {
                     types.push(kind);
                 }
             }
-            self.set_devices(types, persistent_id).await?;
+            // A device whose targets are not set yet gets them, grouped, then.
+            if !types.is_empty() {
+                self.set_devices(types, persistent_id).await?;
+            }
         }
         Ok(())
     }
@@ -675,8 +681,9 @@ impl CompositeDeviceTargets {
             self.target_devices.insert(path.clone(), target);
         }
 
-        // TODO: check this
-        //self.signal_targets_changed().await;
+        // A client that keeps the list, such as one that restores it later,
+        // must not hold on to one read while the targets were being made.
+        self.signal_targets_changed().await;
 
         Ok(())
     }
@@ -743,7 +750,7 @@ impl CompositeDeviceTargets {
     }
 
     /// Emit a DBus signal when target devices change
-    async fn _signal_targets_changed(&self) {
+    async fn signal_targets_changed(&self) {
         let dbus_path = self.path.clone();
         let conn = self._dbus.clone();
 
