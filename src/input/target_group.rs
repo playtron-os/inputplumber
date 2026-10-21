@@ -21,7 +21,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::input::target::TargetDeviceTypeId;
+use evdev::EventType;
+
+use crate::input::{output_event::OutputEvent, target::TargetDeviceTypeId};
 
 /// Prefix of the `phys` of a grouped gamepad target; the group name follows.
 pub const PHYS_PREFIX: &str = "inputplumber/group/";
@@ -70,6 +72,33 @@ pub fn group_of_phys(phys: &str) -> Option<&str> {
 pub fn persistent_id_for(persistent_id: &str, group: &str) -> String {
     format!("{persistent_id}/{group}")
 }
+
+/// Whether an output event from an inactive group's gamepad still reaches the
+/// controller. A program in the background keeps uploading and erasing force
+/// feedback effects, which it waits on, and may stop one, or change the gain;
+/// but it never makes the controller rumble or light up while another group
+/// has it.
+pub fn reaches_controller_when_inactive(event: &OutputEvent) -> bool {
+    match event {
+        OutputEvent::Uinput(_) => true,
+        OutputEvent::Evdev(event) => {
+            event.event_type() == EventType::FORCEFEEDBACK
+                && (event.value() == 0 || event.code() >= FF_GAIN)
+        }
+        OutputEvent::GenericRumble {
+            weak_magnitude,
+            strong_magnitude,
+        } => *weak_magnitude == 0 && *strong_magnitude == 0,
+        OutputEvent::DualSense(_)
+        | OutputEvent::SteamDeckHaptics(_)
+        | OutputEvent::SteamDeckHapticPulse(_)
+        | OutputEvent::SteamDeckRumble(_) => false,
+    }
+}
+
+/// The first force feedback code that sets a device property (gain,
+/// autocentre) rather than playing an effect.
+const FF_GAIN: u16 = 0x60;
 
 /// The groups that exist and the one whose gamepads receive input.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

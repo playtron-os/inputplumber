@@ -587,7 +587,9 @@ impl<T: TargetInputDevice + TargetOutputDevice + Send + 'static> TargetDriver<T>
                         };
 
                         // Send the output event to source devices
-                        let result = client.process_output_event(event).await;
+                        let result = client
+                            .process_target_output_event(self.dbus.path().to_string(), event)
+                            .await;
                         if let Err(e) = result {
                             return Err(e.to_string().into());
                         }

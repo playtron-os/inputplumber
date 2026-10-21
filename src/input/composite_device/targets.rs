@@ -16,8 +16,9 @@ use crate::{
         capability::Capability,
         event::native::NativeEvent,
         manager::ManagerCommand,
+        output_event::OutputEvent,
         target::{client::TargetDeviceClient, TargetDeviceTypeId},
-        target_group::{persistent_id_for, TargetGroups},
+        target_group::{persistent_id_for, reaches_controller_when_inactive, TargetGroups},
     },
 };
 
@@ -343,6 +344,14 @@ impl CompositeDeviceTargets {
     fn receives_input(&self, path: &str) -> bool {
         self.groups
             .receives_input(self.target_groups.get(path).map(String::as_str))
+    }
+
+    /// Whether an output event from the target at the given path reaches the
+    /// controller: anything from a target that receives input, and from an
+    /// inactive group's gamepad only what keeps the program writing to it
+    /// working without making the controller rumble or light up.
+    pub fn receives_output(&self, path: &str, event: &OutputEvent) -> bool {
+        self.receives_input(path) || reaches_controller_when_inactive(event)
     }
 
     /// Record which target group a newly created target belongs to.

@@ -127,6 +127,20 @@ impl CompositeDeviceClient {
     }
 
     /// Process the given output event (blocking)
+    /// Process an output event from the target device at the given DBus path
+    pub async fn process_target_output_event(
+        &self,
+        target_path: String,
+        event: OutputEvent,
+    ) -> Result<(), ClientError> {
+        self.send(CompositeCommand::ProcessTargetOutputEvent(
+            target_path,
+            event,
+        ))
+        .await?;
+        Ok(())
+    }
+
     pub fn blocking_process_output_event(&self, event: OutputEvent) -> Result<(), ClientError> {
         self.tx
             .blocking_send(CompositeCommand::ProcessOutputEvent(event))?;

@@ -40,6 +40,7 @@ pub enum CompositeCommand {
     LoadProfilePath(String, mpsc::Sender<Result<(), String>>),
     ProcessEvent(String, Event),
     ProcessOutputEvent(OutputEvent),
+    ProcessTargetOutputEvent(String, OutputEvent),
     RemoveRecentEvent(Capability),
     SetInterceptActivation(Vec<Capability>, Capability),
     SetInterceptMode(InterceptMode),

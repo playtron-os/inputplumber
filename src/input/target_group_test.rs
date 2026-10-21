@@ -348,3 +348,37 @@ fn only_the_active_groups_gamepads_receive_input() {
     assert!(!groups.receives_input(Some("desktop")));
     assert!(groups.receives_input(Some("game")));
 }
+
+fn ff(code: u16, value: i32) -> OutputEvent {
+    OutputEvent::Evdev(evdev::InputEvent::new(
+        evdev::EventType::FORCEFEEDBACK.0,
+        code,
+        value,
+    ))
+}
+
+#[test]
+fn an_inactive_gamepad_never_rumbles_or_lights_the_controller() {
+    // A game in the background keeps its effects, and may stop one.
+    assert!(reaches_controller_when_inactive(&OutputEvent::Uinput(
+        crate::input::output_event::UinputOutputEvent::FFErase(3)
+    )));
+    assert!(reaches_controller_when_inactive(&ff(3, 0)));
+    assert!(reaches_controller_when_inactive(&ff(0x60, 0xffff)));
+    assert!(reaches_controller_when_inactive(
+        &OutputEvent::GenericRumble {
+            weak_magnitude: 0,
+            strong_magnitude: 0,
+        }
+    ));
+    // It does not play them, or light anything up.
+    assert!(!reaches_controller_when_inactive(&ff(3, 1)));
+    assert!(!reaches_controller_when_inactive(
+        &OutputEvent::GenericRumble {
+            weak_magnitude: 0,
+            strong_magnitude: 1,
+        }
+    ));
+    let led = OutputEvent::Evdev(evdev::InputEvent::new(evdev::EventType::LED.0, 0, 1));
+    assert!(!reaches_controller_when_inactive(&led));
+}

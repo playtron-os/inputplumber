@@ -335,6 +335,17 @@ impl CompositeDevice {
                             log::error!("Failed to process output event: {:?}", e);
                         }
                     }
+                    CompositeCommand::ProcessTargetOutputEvent(path, event) => {
+                        if !self.targets.receives_output(&path, &event) {
+                            log::trace!(
+                                "Dropped output of an inactive target group's gamepad: {path}"
+                            );
+                            continue;
+                        }
+                        if let Err(e) = self.process_output_event(event).await {
+                            log::error!("Failed to process output event: {:?}", e);
+                        }
+                    }
                     CompositeCommand::GetCapabilities(sender) => {
                         if let Err(e) = sender.send(self.capabilities.clone()).await {
                             log::error!("Failed to send capabilities: {:?}", e);
