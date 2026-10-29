@@ -175,6 +175,9 @@ pub struct Manager {
     /// Map of target devices being used by a [CompositeDevice].
     /// E.g. {"/org/shadowblip/InputPlumber/CompositeDevice0": Vec<"/org/shadowblip/InputPlumber/devices/target/dbus0">}
     composite_device_targets: HashMap<String, HashSet<String>>,
+    /// Composite devices whose last source device was removed. They stop on
+    /// their own, so a device that appears meanwhile must not join them.
+    composite_devices_stopping: HashSet<String>,
     /// Track all composite device tasks so they can be gracefully stopped
     composite_device_tasks: JoinSet<()>,
     /// Mapping of DBus path to its corresponding [CompositeDeviceConfig]
@@ -232,6 +235,7 @@ impl Manager {
             used_configs: HashMap::new(),
             composite_device_sources: HashMap::new(),
             composite_device_targets: HashMap::new(),
+            composite_devices_stopping: HashSet::new(),
             composite_device_tasks: Default::default(),
             manage_all_devices: false,
             target_gamepad_order: vec![],
@@ -1086,7 +1090,12 @@ impl Manager {
         }
         for id in to_remove {
             self.source_devices_used.remove::<String>(&id);
+            self.source_devices.remove(&id);
         }
+        // A new composite device can reuse this path, and must not inherit
+        // this one's sources.
+        self.composite_device_sources.remove(&path);
+        self.composite_devices_stopping.remove(&path);
 
         // Find any target devices that were in use by the composite device
         if let Some(target_device_paths) = self.composite_device_targets.get(&path) {
@@ -1147,6 +1156,10 @@ impl Manager {
             let Some(config) = self.used_configs.get(composite_device) else {
                 continue;
             };
+            if self.composite_devices_stopping.contains(composite_device) {
+                log::debug!("Composite device {composite_device:?} is stopping. Skipping.");
+                continue;
+            }
             log::debug!("Checking if existing composite device {composite_device:?} with config {:?} is missing device: {id:?}", config.name);
 
             log::trace!(
@@ -1343,6 +1356,17 @@ impl Manager {
             return Err(format!("Device {} not found in composite device sources", id).into());
         }
         sources.remove(idx.unwrap());
+        let persist = self
+            .used_configs
+            .get(composite_device_path)
+            .and_then(|config| config.options.as_ref())
+            .and_then(|options| options.persist)
+            .unwrap_or(false);
+        if sources.is_empty() && !persist {
+            log::debug!("Last source device removed from {composite_device_path}, which will stop");
+            self.composite_devices_stopping
+                .insert(composite_device_path.clone());
+        }
         self.source_devices.remove(&id);
         self.source_devices_used.remove(&id);
 
@@ -1353,8 +1377,16 @@ impl Manager {
     /// composite device. This is idempotent since the device may have
     /// already been cleaned up by a udev removal event.
     fn remove_stopped_source_device(&mut self, composite_path: &str, device_id: &str) {
-        self.source_devices_used.remove(device_id);
-        self.source_devices.remove(device_id);
+        // A newer device with the same name may already feed another
+        // composite device: that route is not this report's to clear.
+        if self
+            .source_devices_used
+            .get(device_id)
+            .is_some_and(|path| path == composite_path)
+        {
+            self.source_devices_used.remove(device_id);
+            self.source_devices.remove(device_id);
+        }
         if let Some(sources) = self.composite_device_sources.get_mut(composite_path) {
             sources.retain(|(_, id)| id != device_id);
         }
@@ -1985,5 +2017,155 @@ impl Manager {
                 log::error!("Failed to signal gamepad reordering finished. This is bad: {e:?}");
             }
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use tokio::sync::mpsc;
+
+    use super::Manager;
+    use crate::config::CompositeDeviceConfig;
+    use crate::input::composite_device::command::CompositeCommand;
+    use crate::input::info::DeviceInfo;
+    use crate::udev::device::UdevDevice;
+
+    const PAD: &str = "/org/shadowblip/InputPlumber/CompositeDevice0";
+    const OTHER_PAD: &str = "/org/shadowblip/InputPlumber/CompositeDevice1";
+    const EVENT: &str = "evdev://event4242";
+    const HIDRAW: &str = "hidraw://hidraw4242";
+
+    /// A pad made of an event device and a hidraw device, under names no
+    /// machine running the tests has.
+    const CONFIG: &str = r#"
+version: 1
+kind: CompositeDevice
+name: Test pad
+matches: []
+maximum_sources: 2
+source_devices:
+  - group: gamepad
+    udev:
+      sys_name: event4242
+      subsystem: input
+  - group: gamepad
+    udev:
+      sys_name: hidraw4242
+      subsystem: hidraw
+"#;
+
+    /// A manager on a peer-to-peer connection, which needs no bus daemon.
+    async fn manager() -> (Manager, zbus::Connection) {
+        let (ours, theirs) = tokio::net::UnixStream::pair().unwrap();
+        let (conn, peer) = tokio::try_join!(
+            zbus::connection::Builder::unix_stream(ours)
+                .server(zbus::Guid::generate())
+                .unwrap()
+                .p2p()
+                .build(),
+            zbus::connection::Builder::unix_stream(theirs).p2p().build(),
+        )
+        .unwrap();
+        (Manager::new(conn), peer)
+    }
+
+    fn event_device() -> DeviceInfo {
+        UdevDevice::from_devnode("/dev/input", "event4242").into()
+    }
+
+    fn hidraw_device() -> DeviceInfo {
+        UdevDevice::from_devnode("/dev", "hidraw4242").into()
+    }
+
+    /// A running pad fed by both devices, as `start_composite_device` and a
+    /// "Found missing" add leave it. Its commands arrive on the receiver.
+    fn running_pad(manager: &mut Manager) -> mpsc::Receiver<CompositeCommand> {
+        let (tx, rx) = mpsc::channel(16);
+        let config = CompositeDeviceConfig::from_yaml(CONFIG.to_string()).unwrap();
+        manager.composite_devices.insert(PAD.into(), tx.into());
+        for (id, source) in [EVENT, HIDRAW].into_iter().zip(&config.source_devices) {
+            manager.source_devices_used.insert(id.into(), PAD.into());
+            manager.source_devices.insert(id.into(), source.clone());
+            manager
+                .composite_device_sources
+                .entry(PAD.into())
+                .or_default()
+                .push((source.clone(), id.into()));
+        }
+        manager.used_configs.insert(PAD.into(), config);
+        rx
+    }
+
+    /// A driver rebinding a pad removes its device nodes and adds them back
+    /// under the same names within milliseconds (an Xbox pad moving from
+    /// hid-generic to hid-microsoft). The pad stops once its last device is
+    /// removed, so a device that comes back meanwhile must not join it: the
+    /// stop would take it along, and no udev event would bring it back.
+    #[tokio::test]
+    async fn a_device_back_while_its_pad_stops_does_not_join_that_pad() {
+        let (mut manager, _peer) = manager().await;
+        let mut pad = running_pad(&mut manager);
+
+        manager
+            .on_source_device_removed(event_device(), EVENT.into())
+            .await
+            .unwrap();
+        manager
+            .on_source_device_removed(hidraw_device(), HIDRAW.into())
+            .await
+            .unwrap();
+        manager
+            .on_source_device_added(EVENT.into(), event_device())
+            .await
+            .unwrap();
+
+        let mut sent = Vec::new();
+        while let Ok(command) = pad.try_recv() {
+            sent.push(format!("{command:?}"));
+        }
+        assert_eq!(sent.len(), 2, "only the two removals: {sent:#?}");
+        assert!(
+            sent.iter()
+                .all(|command| command.starts_with("SourceDeviceRemoved")),
+            "{sent:#?}"
+        );
+        assert_eq!(manager.source_devices_used.get(EVENT), None);
+    }
+
+    /// A stopped pad's path is reused by the next pad, which must start with
+    /// no sources: stale ones would count against its `maximum_sources`.
+    #[tokio::test]
+    async fn a_stopped_pad_leaves_no_sources_at_its_path() {
+        let (mut manager, _peer) = manager().await;
+        let _pad = running_pad(&mut manager);
+
+        manager
+            .on_composite_device_stopped(PAD.into())
+            .await
+            .unwrap();
+
+        assert_eq!(manager.composite_device_sources.get(PAD), None);
+        assert!(manager.source_devices_used.is_empty());
+        assert!(manager.source_devices.is_empty());
+    }
+
+    /// A pad reports each source it stops, sometimes after a newer device
+    /// under the same name went to another pad. The report must not undo
+    /// that route.
+    #[tokio::test]
+    async fn a_late_stop_report_keeps_the_newer_route() {
+        let (mut manager, _peer) = manager().await;
+        let _pad = running_pad(&mut manager);
+        manager
+            .source_devices_used
+            .insert(EVENT.into(), OTHER_PAD.into());
+
+        manager.remove_stopped_source_device(PAD, EVENT);
+
+        assert_eq!(
+            manager.source_devices_used.get(EVENT).map(String::as_str),
+            Some(OTHER_PAD)
+        );
+        assert!(manager.source_devices.contains_key(EVENT));
     }
 }
