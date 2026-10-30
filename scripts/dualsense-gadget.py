@@ -7,9 +7,8 @@ virtual hidraw nodes unless they belong to a connected Bluetooth device.)
 
 Run as root; Ctrl+C removes the pad. While it runs, send commands to /run/dualsense-gadget.ctl,
 one per line, e.g. echo 'tap cross' | sudo tee /run/dualsense-gadget.ctl:
-  press <button> | release <button> | tap <button> [ms] | dpad up|down|left|right|none
-  unplug | plug | quit
-Buttons: ps cross circle square triangle l1 r1 create options l3 r3 touchpad
+  press <button> | release <button> | tap <button> [ms] | unplug | plug | quit
+Buttons: ps cross circle square triangle l1 r1 create options l3 r3 touchpad up down left right
 """
 import errno
 import fcntl
@@ -40,7 +39,8 @@ BUTTONS = {  # byte and bit in the 64-byte USB input report
     "l1": (9, 0), "r1": (9, 1), "create": (9, 4), "options": (9, 5), "l3": (9, 6), "r3": (9, 7),
     "ps": (10, 0), "touchpad": (10, 1),
 }
-DPAD = {"up": 0, "right": 2, "down": 4, "left": 6, "none": 8}
+DPAD = {"up": 0, "right": 2, "down": 4, "left": 6}
+DPAD_NONE = 8
 
 
 def log(msg):
@@ -137,7 +137,7 @@ def main():
     report = bytearray(64)
     report[0] = 0x01  # USB input report
     report[1:5] = b"\x80\x80\x80\x80"  # sticks centred
-    report[8] = DPAD["none"]
+    report[8] = DPAD_NONE
     report[33] = report[37] = 0x80  # no touch
     report[53] = 0x08  # battery
     pending = []
@@ -162,8 +162,13 @@ def main():
                     if cmd[0] == "tap":
                         ms = int(cmd[2]) if len(cmd) > 2 else 120
                         pending.append((time.time() + ms / 1000, byte, bit))
-                elif cmd[0] == "dpad" and len(cmd) > 1 and cmd[1] in DPAD:
+                elif cmd[0] in ("press", "tap") and len(cmd) > 1 and cmd[1] in DPAD:
                     report[8] = (report[8] & 0xF0) | DPAD[cmd[1]]
+                    if cmd[0] == "tap":
+                        ms = int(cmd[2]) if len(cmd) > 2 else 120
+                        pending.append((time.time() + ms / 1000, 8, None))
+                elif cmd[0] == "release" and len(cmd) > 1 and cmd[1] in DPAD:
+                    report[8] = (report[8] & 0xF0) | DPAD_NONE
                 elif cmd[0] == "unplug" and fd is not None:
                     unplug(fd)
                     fd = None
@@ -173,7 +178,10 @@ def main():
                     return
             now = time.time()
             for item in [p for p in pending if p[0] <= now]:
-                report[item[1]] &= ~(1 << item[2]) & 0xFF
+                if item[2] is None:
+                    report[8] = (report[8] & 0xF0) | DPAD_NONE
+                else:
+                    report[item[1]] &= ~(1 << item[2]) & 0xFF
                 pending.remove(item)
             if fd is None:
                 continue
