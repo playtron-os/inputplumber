@@ -22,10 +22,10 @@ fi
 check() {
   found=0
   sources=""
-  for c in $(busctl --system tree $ip | grep -oE '/org/shadowblip/InputPlumber/CompositeDevice[0-9]+$' | sort -u); do
-    busctl --system get-property $ip "$c" $cd_iface Name | grep -q DualSense || continue
+  for c in $(busctl --system tree $ip 2>/dev/null | grep -oE '/org/shadowblip/InputPlumber/CompositeDevice[0-9]+$' | sort -u); do
+    busctl --system get-property $ip "$c" $cd_iface Name 2>/dev/null | grep -q DualSense || continue
     found=$((found + 1))
-    sources="${c##*/}:$(busctl --system get-property $ip "$c" $cd_iface SourceDevicePaths | grep -oE '(hidraw|event)[0-9]+' | tr '\n' ' ')"
+    sources="${c##*/}:$(busctl --system get-property $ip "$c" $cd_iface SourceDevicePaths 2>/dev/null | grep -oE '(hidraw|event)[0-9]+' | tr '\n' ' ')"
   done
   [ "$found" -eq 1 ] && echo "$sources" | grep -q hidraw
 }
