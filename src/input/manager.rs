@@ -835,6 +835,19 @@ impl Manager {
         target_path: &str,
         composite_path: &str,
     ) -> Result<(), ManagerError> {
+        // A composite device can stop while its targets are still being made.
+        // Those targets must stop too, or they live on as pads nothing feeds.
+        let Some(device) = self.composite_devices.get(composite_path).cloned() else {
+            if let Some(target) = self.target_devices.remove(target_path) {
+                if let Err(e) = target.stop().await {
+                    log::warn!("Failed to stop target device {target_path}: {e:?}");
+                }
+            }
+            let err =
+                ManagerError::AttachTargetDeviceFailed("Failed to find composite device".into());
+            return Err(err);
+        };
+
         // Check to see if the target device is a gamepad
         let is_gamepad = {
             let Some(target) = self.target_devices.get(target_path) else {
@@ -881,12 +894,6 @@ impl Manager {
 
         let Some(target) = self.target_devices.get(target_path) else {
             let err = ManagerError::AttachTargetDeviceFailed("Failed to find target device".into());
-            return Err(err);
-        };
-
-        let Some(device) = self.composite_devices.get(composite_path) else {
-            let err =
-                ManagerError::AttachTargetDeviceFailed("Failed to find composite device".into());
             return Err(err);
         };
 
@@ -2028,12 +2035,15 @@ mod tests {
     use crate::config::CompositeDeviceConfig;
     use crate::input::composite_device::command::CompositeCommand;
     use crate::input::info::DeviceInfo;
+    use crate::input::target::command::TargetCommand;
+    use crate::input::target::TargetDeviceTypeId;
     use crate::udev::device::UdevDevice;
 
     const PAD: &str = "/org/shadowblip/InputPlumber/CompositeDevice0";
     const OTHER_PAD: &str = "/org/shadowblip/InputPlumber/CompositeDevice1";
     const EVENT: &str = "evdev://event4242";
     const HIDRAW: &str = "hidraw://hidraw4242";
+    const GAMEPAD: &str = "/org/shadowblip/InputPlumber/devices/target/gamepad0";
 
     /// A pad made of an event device and a hidraw device, under names no
     /// machine running the tests has.
@@ -2167,5 +2177,39 @@ source_devices:
             Some(OTHER_PAD)
         );
         assert!(manager.source_devices.contains_key(EVENT));
+    }
+
+    /// A pad can stop while its targets are still being made, as one does
+    /// when a driver rebind takes its devices. Each target then asks to be
+    /// attached to a pad that is gone, and must stop rather than linger as a
+    /// second, silent controller.
+    #[tokio::test]
+    async fn a_target_made_for_a_stopped_pad_stops() {
+        let (mut manager, _peer) = manager().await;
+        let (tx, mut rx) = mpsc::channel(4);
+        manager.target_devices.insert(GAMEPAD.into(), tx.into());
+        let (stopped_tx, stopped) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            while let Some(command) = rx.recv().await {
+                match command {
+                    TargetCommand::GetType(reply) => {
+                        let kind = TargetDeviceTypeId::try_from("xbox-series").unwrap();
+                        let _ = reply.send(kind).await;
+                    }
+                    TargetCommand::Stop => {
+                        let _ = stopped_tx.send(());
+                        return;
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        assert!(manager.attach_target_device(GAMEPAD, PAD).await.is_err());
+
+        let stop = tokio::time::timeout(std::time::Duration::from_millis(250), stopped).await;
+        assert!(matches!(stop, Ok(Ok(()))), "the target was not stopped");
+        assert!(manager.target_devices.is_empty());
+        assert!(manager.target_gamepad_order.is_empty());
     }
 }
