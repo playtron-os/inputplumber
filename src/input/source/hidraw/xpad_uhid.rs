@@ -1,4 +1,9 @@
-use std::{collections::HashMap, error::Error, fmt::Debug, time::Instant};
+use std::{
+    collections::HashMap,
+    error::Error,
+    fmt::Debug,
+    time::{Duration, Instant},
+};
 
 use evdev::{FFEffectData, FFEffectKind};
 use packed_struct::types::SizedInteger;
@@ -20,9 +25,17 @@ use crate::{
         },
         output_capability::{Haptic, OutputCapability},
         output_event::OutputEvent,
-        source::{InputError, OutputError, SourceInputDevice, SourceOutputDevice},
+        source::{
+            InputError, OutputError, SourceDriverOptions, SourceInputDevice, SourceOutputDevice,
+        },
     },
     udev::device::UdevDevice,
+};
+
+/// Each poll waits for one report, so the driver loop must not sleep as well.
+pub const SOURCE_DRIVER_OPTIONS: SourceDriverOptions = SourceDriverOptions {
+    poll_rate: Duration::ZERO,
+    buffer_size: 1024,
 };
 
 /// XpadUhid source device implementation
@@ -417,3 +430,67 @@ pub const OUTPUT_CAPABILITIES: &[OutputCapability] = &[
     OutputCapability::Haptics(Haptic::TrackpadLeft),
     OutputCapability::Haptics(Haptic::TrackpadRight),
 ];
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use tokio::sync::mpsc;
+
+    use crate::{
+        input::{
+            capability::{Capability, Gamepad, GamepadButton},
+            composite_device::command::CompositeCommand,
+            event::{native::NativeEvent, value::InputValue},
+            info::DeviceInfo,
+            source::{InputError, SourceDriver, SourceInputDevice, SourceOutputDevice},
+        },
+        udev::device::UdevDevice,
+    };
+
+    use super::SOURCE_DRIVER_OPTIONS;
+
+    /// A pad with reports waiting, read one per poll like the real driver.
+    struct QueuedReports(usize);
+
+    impl SourceInputDevice for QueuedReports {
+        fn poll(&mut self) -> Result<Vec<NativeEvent>, InputError> {
+            if self.0 == 0 {
+                return Err("disconnected".into());
+            }
+            self.0 -= 1;
+            let pressed = self.0 % 2 == 1;
+            let cap = Capability::Gamepad(Gamepad::Button(GamepadButton::DPadDown));
+            Ok(vec![NativeEvent::new(cap, InputValue::Bool(pressed))])
+        }
+
+        fn get_capabilities(&self) -> Result<Vec<Capability>, InputError> {
+            Ok(vec![])
+        }
+    }
+
+    impl SourceOutputDevice for QueuedReports {}
+
+    #[tokio::test]
+    async fn queued_reports_reach_the_composite_device_at_once() {
+        const REPORTS: usize = 10;
+        let (tx, mut rx) = mpsc::channel(64);
+        let driver = SourceDriver::new_with_options(
+            tx.into(),
+            QueuedReports(REPORTS),
+            DeviceInfo::Udev(UdevDevice::default()),
+            SOURCE_DRIVER_OPTIONS,
+            None,
+        );
+        tokio::spawn(async move { driver.run().await.is_ok() });
+
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(250);
+        let mut received = 0;
+        while let Ok(Some(command)) = tokio::time::timeout_at(deadline, rx.recv()).await {
+            if matches!(command, CompositeCommand::ProcessEvent(..)) {
+                received += 1;
+            }
+        }
+        assert_eq!(received, REPORTS, "reports still queued after 250 ms");
+    }
+}
