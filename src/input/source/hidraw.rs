@@ -514,16 +514,12 @@ impl HidRawDevice {
                 Ok(Self::Fts3528Touchscreen(source_device))
             }
             DriverType::XpadUhid => {
-                let options = SourceDriverOptions {
-                    poll_rate: Duration::from_millis(500),
-                    buffer_size: 1024,
-                };
                 let device = XpadUhid::new(device_info.clone())?;
                 let source_device = SourceDriver::new_with_options(
                     composite_device,
                     device,
                     device_info.into(),
-                    options,
+                    xpad_uhid::SOURCE_DRIVER_OPTIONS,
                     conf,
                 );
                 Ok(Self::XpadUhid(source_device))
